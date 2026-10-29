@@ -1,0 +1,154 @@
+import { type CheckinRecord } from './checkinData.uts'
+
+export type CSVRow = {
+  headers: string[]
+  values: string[]
+}
+
+export type CSVTextCallback = (csvText: string) => void
+
+function csvEscape(value: string): string {
+  let text = value
+  if (text.includes('"')) text = text.replace(/"/g, '""')
+  if (text.includes(',') || text.includes('"') || text.includes('\n') || text.includes('\r')) {
+    return '"' + text + '"'
+  }
+  return text
+}
+
+export function parseCSVToObjects(csvText: string): CSVRow[] {
+  let text = csvText
+  if (text.length > 0 && text.charCodeAt(0) == 0xFEFF) text = text.substring(1)
+  const rows: string[][] = []
+  let row: string[] = []
+  let field = ''
+  let inQuotes = false
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charAt(i)
+    if (ch == '"') {
+      if (inQuotes && i + 1 < text.length && text.charAt(i + 1) == '"') {
+        field += '"'
+        i += 1
+      } else {
+        inQuotes = !inQuotes
+      }
+    } else if (ch == ',' && !inQuotes) {
+      row.push(field)
+      field = ''
+    } else if ((ch == '\n' || ch == '\r') && !inQuotes) {
+      if (ch == '\r' && i + 1 < text.length && text.charAt(i + 1) == '\n') i += 1
+      row.push(field)
+      field = ''
+      if (row.length > 1 || row[0].length > 0) rows.push(row)
+      row = []
+    } else {
+      field += ch
+    }
+  }
+  row.push(field)
+  if (row.length > 1 || row[0].length > 0) rows.push(row)
+
+  const result: CSVRow[] = []
+  if (rows.length < 2) return result
+  const headers = rows[0]
+  for (let r = 1; r < rows.length; r++) {
+    const item: CSVRow = { headers: headers, values: rows[r] }
+    result.push(item)
+  }
+  return result
+}
+
+export function csvGet(row: CSVRow, key: string): string {
+  const target = key.toLowerCase()
+  for (let i = 0; i < row.headers.length; i++) {
+    if (row.headers[i].trim().toLowerCase() == target) {
+      if (i < row.values.length) return row.values[i].trim()
+      return ''
+    }
+  }
+  return ''
+}
+
+export function exportCheckinsToCSV(checkins: CheckinRecord[]): string {
+  const headers: string[] = ['id', 'userId', 'userName', 'courseId', 'courseName', 'checkinTime', 'location', 'result']
+  let csv = '\uFEFF' + headers.join(',') + '\r\n'
+  for (let i = 0; i < checkins.length; i++) {
+    const item = checkins[i]
+    const values: string[] = [
+      item.id.toString(),
+      item.userId.toString(),
+      csvEscape(item.userName),
+      item.courseId.toString(),
+      csvEscape(item.courseName),
+      csvEscape(item.checkinTime),
+      csvEscape(item.location),
+      csvEscape(item.result)
+    ]
+    csv += values.join(',') + '\r\n'
+  }
+
+  // #ifdef H5
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'checkins.csv'
+  if (document.body != null) document.body.appendChild(link)
+  link.click()
+  if (document.body != null) document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+  // #endif
+
+  // #ifndef H5
+  uni.setClipboardData({
+    data: csv,
+    success: () => uni.showToast({ title: 'CSV 已复制到剪贴板', icon: 'none' })
+  })
+  // #endif
+
+  return csv
+}
+
+export function chooseCSVFile(callback: CSVTextCallback): void {
+  // #ifdef H5
+  const input = document.createElement('input')
+  input.type = 'file'
+  input.accept = '.csv,text/csv'
+  input.style.display = 'none'
+  if (document.body != null) document.body.appendChild(input)
+  input.onchange = (event: Event) => {
+    const target = event.target as HTMLInputElement
+    if (target.files == null || target.files.length == 0) return
+    const file = target.files[0]
+    const reader = new FileReader()
+    reader.onload = () => {
+      const content = reader.result
+      if (content != null) callback(String(content))
+    }
+    reader.readAsText(file)
+  }
+  input.click()
+  // #endif
+
+  // #ifndef H5
+  uni.chooseFile({
+    count: 1,
+    extension: ['.csv'],
+    success: (res) => {
+      const path = res.tempFilePaths[0]
+      // #ifdef MP-WEIXIN
+      uni.getFileSystemManager().readFile({
+        filePath: path,
+        encoding: 'utf-8',
+        success: (readRes) => callback(String(readRes.data)),
+        fail: () => uni.showToast({ title: '读取 CSV 失败', icon: 'none' })
+      })
+      // #endif
+      // #ifndef MP-WEIXIN
+      uni.showToast({ title: '请在 Web 端导入 CSV', icon: 'none' })
+      // #endif
+    },
+    fail: () => uni.showToast({ title: '未选择文件', icon: 'none' })
+  })
+  // #endif
+}

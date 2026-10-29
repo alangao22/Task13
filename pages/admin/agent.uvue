@@ -75,11 +75,15 @@
                 <view v-if="msg.data.actions.length > 0" class="card-actions">
                   <view
                     class="card-action"
+                    :class="{ 'card-action-disabled': isActionDisabled(action) }"
                     v-for="(action, actionIndex) in msg.data.actions"
                     :key="actionIndex"
-                    @click="onCardAction(action)"
+                    @click="onCardAction(action, msg, actionIndex)"
                   >
-                    <text class="card-action-text">{{ action.text }}</text>
+                    <text
+                      class="card-action-text"
+                      :class="{ 'card-action-text-disabled': isActionDisabled(action) }"
+                    >{{ action.text }}</text>
                   </view>
                 </view>
               </view>
@@ -105,6 +109,7 @@
 
     <view class="composer">
       <scroll-view
+        v-if="suggestions.length > 0"
         class="chips"
         direction="horizontal"
         :show-scrollbar="false"
@@ -112,7 +117,7 @@
         <view class="chips-inner">
           <view
             class="chip"
-            v-for="(chip, index) in chips"
+            v-for="(chip, index) in suggestions"
             :key="index"
             @click="useChip(chip)"
           >
@@ -152,6 +157,15 @@ import {
   type AgentCardItem,
   type ChatMessage
 } from '@/utils/agentEngine.uts'
+import { users } from '@/utils/userData.uts'
+import { type User } from '@/utils/userData.uts'
+import { courses } from '@/utils/courseData.uts'
+import { type Course } from '@/utils/courseData.uts'
+import { checkinTable } from '@/utils/checkinData.uts'
+import { chooseCSVFile, parseCSVToObjects, csvGet, exportCheckinsToCSV } from '@/utils/fileUtils.uts'
+
+const WELCOME_TEXT = '你好，我是系统业务助理。你可以直接对我说：\n- 查一下最新签到\n- 新增用户 张三\n- 修改数据结构的上课时间'
+const DEFAULT_SUGGESTIONS: string[] = ['查一下最新签到', '新增用户 张三', '修改数据结构的上课时间']
 
 export default {
   data() {
@@ -163,7 +177,7 @@ export default {
       seq: 0,
       alive: true,
       windowHeight: 0,
-      chips: ['查询所有用户', '新增用户', '删除课程', '所有签到']
+      suggestions: [] as string[]
     }
   },
   computed: {
@@ -173,6 +187,29 @@ export default {
     pageStyle(): string {
       if (this.windowHeight > 0) return 'height: ' + this.windowHeight.toString() + 'px;'
       return 'height: 100vh;'
+    }
+  },
+  onLoad() {
+    const saved = uni.getStorageSync('agent_history')
+    if (saved != null && saved.length > 0) {
+      const history = saved as ChatMessage[]
+      let start = history.length - 20
+      if (start < 0) start = 0
+      this.messages = history.slice(start)
+      this.seq = Date.now()
+      for (let i = 0; i < this.messages.length; i++) {
+        const actions = this.messages[i].data.actions
+        for (let j = 0; j < actions.length; j++) {
+          const actionType = actions[j].actionType
+          if (actionType == 'confirm_execute' || actionType == 'cancel_action' || actionType == 'edit_info') {
+            actions[j].status = 'disabled'
+          }
+        }
+      }
+      this.suggestions = DEFAULT_SUGGESTIONS
+      this.scrollToBottom()
+    } else {
+      this.appendMessage('agent', 'text', WELCOME_TEXT, null, DEFAULT_SUGGESTIONS)
     }
   },
   onReady() {
@@ -190,6 +227,7 @@ export default {
       if (text.length == 0) return
 
       this.inputText = ''
+      this.suggestions = []
       this.appendMessage('user', 'text', text, null)
       this.sending = true
       this.scrollToBottom()
@@ -198,10 +236,11 @@ export default {
         if (!this.alive) return
         const reply = processMessage(text, 'admin', '')
         this.sending = false
+        const nextSuggestions: string[] = reply.suggestions == null ? [] : reply.suggestions
         if (reply.type == 'card') {
-          this.appendMessage('agent', 'card', reply.content, reply.data)
+          this.appendMessage('agent', 'card', reply.content, reply.data, nextSuggestions)
         } else {
-          this.appendMessage('agent', 'text', reply.content, reply.data)
+          this.appendMessage('agent', 'text', reply.content, reply.data, nextSuggestions)
         }
       }, 320)
     },
@@ -210,7 +249,13 @@ export default {
       this.inputText = chip
       this.send()
     },
-    appendMessage(role: 'user' | 'agent', type: 'text' | 'card', content: string, data: AgentCard | null) {
+    appendMessage(
+      role: 'user' | 'agent',
+      type: 'text' | 'card',
+      content: string,
+      data: AgentCard | null,
+      suggestions: string[] = []
+    ) {
       this.seq += 1
       const id = 'm-' + this.seq.toString()
       const message: ChatMessage = {
@@ -218,10 +263,19 @@ export default {
         role: role,
         type: type,
         content: content,
-        data: data == null ? emptyCard() : data
+        data: data == null ? emptyCard() : data,
+        suggestions: suggestions
       }
       this.messages.push(message)
+      if (role == 'agent') this.suggestions = suggestions
+      this.saveHistory()
       this.scrollToBottom()
+    },
+    saveHistory() {
+      let start = this.messages.length - 20
+      if (start < 0) start = 0
+      if (start > 0) this.messages = this.messages.slice(start)
+      uni.setStorageSync('agent_history', this.messages)
     },
     scrollToBottom() {
       this.scrollInto = ''
@@ -236,25 +290,154 @@ export default {
     visibleItems(items: AgentCardItem[]): AgentCardItem[] {
       return items.slice(0, 10)
     },
-    onCardAction(action: AgentCardAction) {
+    isActionDisabled(action: AgentCardAction): boolean {
+      const status = action.status
+      return status != null && status.length > 0
+    },
+    onCardAction(action: AgentCardAction, message: ChatMessage, actionIndex: number) {
       if (this.sending) return
+      if (this.isActionDisabled(action)) return
+      const actions = message.data.actions
+      if (actionIndex < 0 || actionIndex >= actions.length) return
+
+      const actionType = action.actionType
+      let nextStatus: string = 'done'
+      if (actionType == 'cancel_action') nextStatus = 'canceled'
+      else if (actionType == 'edit_info') nextStatus = 'edited'
+      for (let i = 0; i < actions.length; i++) {
+        actions[i].status = i == actionIndex ? nextStatus : 'disabled'
+      }
+
+      if (actionType == 'trigger_import_user') {
+        this.suggestions = []
+        this.appendMessage('user', 'text', action.text, null)
+        this.importUsers()
+        return
+      }
+      if (actionType == 'trigger_import_course') {
+        this.suggestions = []
+        this.appendMessage('user', 'text', action.text, null)
+        this.importCourses()
+        return
+      }
+      if (actionType == 'trigger_export_checkin') {
+        this.suggestions = []
+        this.appendMessage('user', 'text', action.text, null)
+        this.exportCheckins()
+        return
+      }
+
       const url = action.url
       if (url != null && url.length > 0) {
         uni.navigateTo({ url: url })
         return
       }
-      const actionType = action.actionType
       if (actionType == null || actionType.length == 0) return
 
       this.appendMessage('user', 'text', action.text, null)
       let command = '/' + actionType
       if (actionType.startsWith('/')) command = actionType
       const reply = processMessage(command, 'admin', '')
+      const nextSuggestions: string[] = reply.suggestions == null ? [] : reply.suggestions
       if (reply.type == 'card') {
-        this.appendMessage('agent', 'card', reply.content, reply.data)
+        this.appendMessage('agent', 'card', reply.content, reply.data, nextSuggestions)
       } else {
-        this.appendMessage('agent', 'text', reply.content, reply.data)
+        this.appendMessage('agent', 'text', reply.content, reply.data, nextSuggestions)
       }
+    },
+    importUsers() {
+      chooseCSVFile((csvText: string) => {
+        if (!this.alive) return
+        const rows = parseCSVToObjects(csvText)
+        let count = 0
+        let maxId = 0
+        for (let i = 0; i < users.length; i++) {
+          if (users[i].id > maxId) maxId = users[i].id
+        }
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i]
+          let name = csvGet(row, 'name')
+          if (name.length == 0) name = csvGet(row, '姓名')
+          let studentNo = csvGet(row, 'studentNo').toUpperCase()
+          if (studentNo.length == 0) studentNo = csvGet(row, '学号').toUpperCase()
+          if (name.length == 0 || studentNo.length == 0) continue
+          let exists = false
+          for (let j = 0; j < users.length; j++) {
+            if (users[j].studentNo == studentNo) exists = true
+          }
+          if (exists) continue
+          let role: 'student' | 'teacher' | 'admin' = 'student'
+          const roleValue = csvGet(row, 'role').toLowerCase()
+          if (roleValue.includes('teacher') || roleValue.includes('老师') || roleValue.includes('教师')) role = 'teacher'
+          else if (roleValue.includes('admin') || roleValue.includes('管理员')) role = 'admin'
+          const newUser: User = {
+            id: maxId + count + 1,
+            name: name,
+            studentNo: studentNo,
+            role: role
+          }
+          let phone = csvGet(row, 'phone')
+          if (phone.length == 0) phone = csvGet(row, '手机')
+          let email = csvGet(row, 'email')
+          if (email.length == 0) email = csvGet(row, '邮箱')
+          if (phone.length > 0) newUser.phone = phone
+          if (email.length > 0) newUser.email = email
+          users.push(newUser)
+          count += 1
+        }
+        uni.showToast({ title: '已导入 ' + count.toString() + ' 位用户', icon: 'none' })
+        this.appendMessage('agent', 'text', '已导入 ' + count.toString() + ' 位用户。', null, DEFAULT_SUGGESTIONS)
+      })
+    },
+    importCourses() {
+      chooseCSVFile((csvText: string) => {
+        if (!this.alive) return
+        const rows = parseCSVToObjects(csvText)
+        let count = 0
+        let maxId = 0
+        for (let i = 0; i < courses.length; i++) {
+          if (courses[i].id > maxId) maxId = courses[i].id
+        }
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i]
+          let name = csvGet(row, 'name')
+          if (name.length == 0) name = csvGet(row, '课程名称')
+          const startTime = csvGet(row, 'startTime')
+          if (name.length == 0 || startTime.length == 0) continue
+          let latitude = Number(csvGet(row, 'latitude'))
+          let longitude = Number(csvGet(row, 'longitude'))
+          if (isNaN(latitude)) latitude = 0
+          if (isNaN(longitude)) longitude = 0
+          let signStart = csvGet(row, 'signStart')
+          let signEnd = csvGet(row, 'signEnd')
+          if (signStart.length == 0) signStart = startTime
+          if (signEnd.length == 0) signEnd = startTime
+          let teacherName = csvGet(row, 'teacherName')
+          if (teacherName.length == 0) teacherName = '未指定'
+          const newCourse: Course = {
+            id: maxId + count + 1,
+            name: name,
+            latitude: latitude,
+            longitude: longitude,
+            startTime: startTime,
+            signStart: signStart,
+            signEnd: signEnd,
+            teacherName: teacherName
+          }
+          let location = csvGet(row, 'location')
+          if (location.length == 0) location = csvGet(row, '地点')
+          if (location.length > 0) newCourse.location = location
+          courses.push(newCourse)
+          count += 1
+        }
+        uni.showToast({ title: '已导入 ' + count.toString() + ' 门课程', icon: 'none' })
+        this.appendMessage('agent', 'text', '已导入 ' + count.toString() + ' 门课程。', null, DEFAULT_SUGGESTIONS)
+      })
+    },
+    exportCheckins() {
+      const count = checkinTable.length
+      exportCheckinsToCSV(checkinTable)
+      this.appendMessage('agent', 'text', '已导出 ' + count.toString() + ' 条签到记录。', null, DEFAULT_SUGGESTIONS)
     }
   }
 }
@@ -576,6 +759,15 @@ export default {
 .card-action-text {
   font-size: 22rpx;
   color: #007aff;
+}
+
+.card-action-disabled {
+  background-color: #f2f3f6;
+  border-color: #e2e4e9;
+}
+
+.card-action-text-disabled {
+  color: #a6aab2;
 }
 
 /* ---------------- 思考态 ---------------- */

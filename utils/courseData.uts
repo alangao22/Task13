@@ -7,7 +7,8 @@ export type Course = {
   startTime: string
   signStart: string
   signEnd: string
-  teacherName?: string // 新增：发布课程的老师名字
+  teacherName?: string // 发布课程的老师名字
+  location?: string // 上课地点
 }
 
 export const courses: Course[] = [
@@ -20,6 +21,7 @@ export const courses: Course[] = [
     signStart: '2000-01-01 00:00',
     signEnd: '2099-12-31 23:59',
     teacherName: '系统',
+    location: '线上',
   },
   {
     id: 1,
@@ -30,6 +32,7 @@ export const courses: Course[] = [
     signStart: '2026-10-22 07:50',
     signEnd: '2026-10-22 08:20',
     teacherName: '赵老师', // 归属赵老师
+    location: 'A栋101',
   },
   {
     id: 2,
@@ -40,6 +43,7 @@ export const courses: Course[] = [
     signStart: '2026-10-22 09:50',
     signEnd: '2026-10-22 10:20',
     teacherName: '赵老师', // 归属赵老师
+    location: 'A栋201',
   },
 ]
 

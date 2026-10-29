@@ -56,7 +56,10 @@ export default {
         uni.navigateTo({ url: `/pages/teacher/checkins?teacherName=${encodeURIComponent(this.userName)}` })
       }
     },
-    goBack() { uni.navigateBack() }
+    goBack() {
+      uni.removeStorageSync('agent_history')
+      uni.navigateBack()
+    }
   }
 }
 </script>

@@ -53,7 +53,10 @@ export default {
       else if (type === 'courses') uni.navigateTo({ url: '/pages/admin/courses' })
       else if (type === 'checkins') uni.navigateTo({ url: '/pages/admin/checkins' })
     },
-    goBack() { uni.navigateBack() }
+    goBack() {
+      uni.removeStorageSync('agent_history')
+      uni.navigateBack()
+    }
   }
 }
 </script>

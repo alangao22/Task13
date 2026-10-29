@@ -15,6 +15,10 @@
 
 <script lang="ts">
 export default {
+  onLoad() {
+    // 回到身份选择页视为退出登录，清空 Agent 会话记忆。
+    uni.removeStorageSync('agent_history')
+  },
   methods: {
     goLogin(role: string) {
       if (role === 'student') {

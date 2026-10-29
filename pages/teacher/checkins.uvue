@@ -1,6 +1,7 @@
 <template>
   <view class="page">
     <view class="top-bar">
+      <button class="top-btn export-btn" @click="exportData">导出数据</button>
       <button class="top-btn edit-btn" :class="{ 'active-mode': mode === 'edit' }" @click="toggleMode('edit')">修改结果</button>
       <button class="top-btn del-btn" :class="{ 'active-mode': mode === 'delete' }" @click="toggleMode('delete')">删除记录</button>
     </view>
@@ -28,8 +29,9 @@
 </template>
 
 <script lang="ts">
-import { checkinTable } from '@/utils/checkinData.uts'
+import { checkinTable, type CheckinRecord } from '@/utils/checkinData.uts'
 import { courses } from '@/utils/courseData.uts'
+import { exportCheckinsToCSV } from '@/utils/fileUtils.uts'
 
 export default {
   data() {
@@ -41,7 +43,7 @@ export default {
     }
   },
   computed: {
-    myRecords(): any[] {
+    myRecords(): CheckinRecord[] {
       const myCourseIds = this.allCourses
         .filter(c => c.teacherName === this.teacherName)
         .map(c => c.id)
@@ -57,6 +59,10 @@ export default {
   methods: {
     toggleMode(m: string) {
       this.mode = this.mode === m ? 'normal' : m;
+    },
+    exportData() {
+      exportCheckinsToCSV(this.myRecords)
+      uni.showToast({ title: '已导出 ' + this.myRecords.length.toString() + ' 条', icon: 'none' })
     },
     onItemClick(record: any, index: number) {
       if (this.mode === 'edit') {
@@ -92,6 +98,7 @@ export default {
 .top-btn:first-child { margin-left: 0; }
 .top-btn:last-child { margin-right: 0; }
 .edit-btn { background-color: #ff9500; }
+.export-btn { background-color: #34c759; }
 .del-btn { background-color: #ff3b30; }
 .active-mode { opacity: 0.6; border: 4rpx solid #333; }
 .hint-bar { background-color: #fff4e6; color: #ff9500; padding: 20rpx; text-align: center; font-size: 26rpx; border-radius: 12rpx; margin-bottom: 20rpx; }

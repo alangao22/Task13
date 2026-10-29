@@ -2,6 +2,7 @@
   <view class="page">
     <view class="top-bar">
       <button class="top-btn add-btn" @click="openAdd">新增用户</button>
+      <button class="top-btn import-btn" @click="importUsers">导入数据</button>
       <button class="top-btn edit-btn" :class="{ 'active-mode': mode === 'edit' }" @click="toggleMode('edit')">修改</button>
       <button class="top-btn del-btn" :class="{ 'active-mode': mode === 'delete' }" @click="toggleMode('delete')">删除</button>
     </view>
@@ -45,6 +46,8 @@
 
 <script lang="ts">
 import { users } from '@/utils/userData.uts'
+import { type User } from '@/utils/userData.uts'
+import { chooseCSVFile, parseCSVToObjects, csvGet } from '@/utils/fileUtils.uts'
 
 export default {
   data() {
@@ -120,6 +123,49 @@ export default {
       this.showModal = false;
       this.mode = 'normal';
       uni.showToast({ title: '操作成功', icon: 'success' });
+    },
+    importUsers() {
+      chooseCSVFile((csvText: string) => {
+        const rows = parseCSVToObjects(csvText)
+        let count = 0
+        let maxId = 0
+        for (let i = 0; i < users.length; i++) {
+          if (users[i].id > maxId) maxId = users[i].id
+        }
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i]
+          let name = csvGet(row, 'name')
+          if (name.length == 0) name = csvGet(row, '姓名')
+          let studentNo = csvGet(row, 'studentNo').toUpperCase()
+          if (studentNo.length == 0) studentNo = csvGet(row, '学号').toUpperCase()
+          if (name.length == 0 || studentNo.length == 0) continue
+          let exists = false
+          for (let j = 0; j < users.length; j++) {
+            if (users[j].studentNo.toUpperCase() == studentNo) exists = true
+          }
+          if (exists) continue
+          let role: 'student' | 'teacher' | 'admin' = 'student'
+          const roleValue = csvGet(row, 'role').toLowerCase()
+          if (roleValue.includes('teacher') || roleValue.includes('老师') || roleValue.includes('教师')) role = 'teacher'
+          else if (roleValue.includes('admin') || roleValue.includes('管理员')) role = 'admin'
+          const newUser: User = {
+            id: maxId + count + 1,
+            name: name,
+            studentNo: studentNo,
+            role: role
+          }
+          let phone = csvGet(row, 'phone')
+          if (phone.length == 0) phone = csvGet(row, '手机')
+          let email = csvGet(row, 'email')
+          if (email.length == 0) email = csvGet(row, '邮箱')
+          if (phone.length > 0) newUser.phone = phone
+          if (email.length > 0) newUser.email = email
+          users.push(newUser)
+          count += 1
+        }
+        this.userList = [...users]
+        uni.showToast({ title: '已导入 ' + count.toString() + ' 位用户', icon: 'none' })
+      })
     }
   }
 }
@@ -132,6 +178,7 @@ export default {
 .top-btn:first-child { margin-left: 0; }
 .top-btn:last-child { margin-right: 0; }
 .add-btn { background-color: #007aff; }
+.import-btn { background-color: #34c759; }
 .edit-btn { background-color: #ff9500; }
 .del-btn { background-color: #ff3b30; }
 .active-mode { opacity: 0.6; border: 4rpx solid #333; }

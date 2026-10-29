@@ -25,6 +25,7 @@ export type AgentCardAction = {
   text: string
   url?: string
   actionType?: string
+  status?: string // '' | done | canceled | edited | disabled
 }
 
 export type AgentCard = {
@@ -39,6 +40,7 @@ export type AgentReply = {
   type: AgentReplyType
   content: string
   data: AgentCard
+  suggestions?: string[]
 }
 
 export type ChatMessage = {
@@ -47,10 +49,14 @@ export type ChatMessage = {
   type: 'text' | 'card'
   content: string
   data: AgentCard
+  suggestions?: string[]
 }
 
 // 命中黑名单或未匹配到任何业务意图时，统一使用这句话。
 export const REFUSAL_MESSAGE: string = '我是签到业务助理，仅支持处理用户、课程和签到数据的查询与操作哦。'
+
+// 所有取消/中断路径统一使用这句话。
+const CANCEL_MESSAGE: string = '好的，已为您取消当前操作。您可以随时发起新的指令。'
 
 const MAX_INPUT_LENGTH: number = 120
 
@@ -129,21 +135,31 @@ type PendingOperation = {
   userName: string
   studentNo: string
   userRole: string
+  userPhone: string
+  userEmail: string
   targetUserId: number
   courseName: string
   targetCourseId: number
   teacherName: string
+  courseLocation: string
   timeValue: string
-  fieldName: string // studentNo | role | time | teacher
+  fieldName: string // 用户：name/studentNo/role/phone/email；课程：courseName/time/signStart/signEnd/teacher/location/latitude/longitude
   newValue: string
   ids: number[]
   label: string
   minutePending: boolean
   timeSlots: TimeSlots
+  hasTimeAdjustment: boolean
+  adjustMinutes: number
+  adjustField: string
 }
 
 let sessionState: string = 'idle' // idle | awaiting_slots | awaiting_confirm
 let pendingOp: PendingOperation | null = null
+// 仅用于追问话术判断“纠错/改写”语气，不参与业务状态。
+let lastUserInput: string = ''
+// 保留原始大小写，用于写入地点、课程名、姓名、邮箱等展示字段。
+let rawUserInput: string = ''
 
 // 当前会话角色：admin / teacher。教师模式会自动收窄查询与操作范围。
 let currentRole: string = 'admin'
@@ -312,14 +328,14 @@ function isTeacherMode(): boolean {
 function isMyCourse(course: Course): boolean {
   if (!isTeacherMode()) return true
   const teacher = course.teacherName
-  return teacher != null && teacher == currentTeacherName
+  return teacher != null && teacher.toLowerCase() == currentTeacherName.toLowerCase()
 }
 
 function myCourseIds(): number[] {
   const ids: number[] = []
   for (let i = 0; i < courses.length; i++) {
     const teacher = courses[i].teacherName
-    if (teacher != null && teacher == currentTeacherName) {
+    if (teacher != null && teacher.toLowerCase() == currentTeacherName.toLowerCase()) {
       ids.push(courses[i].id)
     }
   }
@@ -572,7 +588,8 @@ function queryUsers(text: string, keyword: string, stats: boolean): AgentReply {
     const userActions: AgentCardAction[] = []
     const adminAction: AgentCardAction = {
       text: '前往用户管理',
-      url: '/pages/admin/users'
+      url: '/pages/admin/users',
+      status: ''
     }
     userActions.push(adminAction)
     card.actions = userActions
@@ -580,7 +597,8 @@ function queryUsers(text: string, keyword: string, stats: boolean): AgentReply {
     const teacherActions: AgentCardAction[] = []
     const teacherAction: AgentCardAction = {
       text: '前往签到管理',
-      url: '/pages/teacher/checkins?teacherName=' + encodeURIComponent(currentTeacherName)
+      url: '/pages/teacher/checkins?teacherName=' + encodeURIComponent(currentTeacherName),
+      status: ''
     }
     teacherActions.push(teacherAction)
     card.actions = teacherActions
@@ -633,13 +651,15 @@ function queryCourses(text: string, keyword: string, stats: boolean): AgentReply
   if (currentRole == 'teacher') {
     const teacherAction: AgentCardAction = {
       text: '前往课程管理',
-      url: '/pages/teacher/courses?teacherName=' + encodeURIComponent(currentTeacherName)
+      url: '/pages/teacher/courses?teacherName=' + encodeURIComponent(currentTeacherName),
+      status: ''
     }
     courseActions.push(teacherAction)
   } else {
     const adminAction: AgentCardAction = {
       text: '前往课程管理',
-      url: '/pages/admin/courses'
+      url: '/pages/admin/courses',
+      status: ''
     }
     courseActions.push(adminAction)
   }
@@ -717,13 +737,15 @@ function queryCheckins(text: string, keyword: string, stats: boolean): AgentRepl
   if (currentRole == 'teacher') {
     const teacherAction: AgentCardAction = {
       text: '前往签到管理',
-      url: '/pages/teacher/checkins?teacherName=' + encodeURIComponent(currentTeacherName)
+      url: '/pages/teacher/checkins?teacherName=' + encodeURIComponent(currentTeacherName),
+      status: ''
     }
     actions.push(teacherAction)
   } else {
     const adminAction: AgentCardAction = {
       text: '前往签到管理',
-      url: '/pages/admin/checkins'
+      url: '/pages/admin/checkins',
+      status: ''
     }
     actions.push(adminAction)
   }
@@ -770,17 +792,23 @@ function createOperation(intent: string): PendingOperation {
     userName: '',
     studentNo: '',
     userRole: '',
+    userPhone: '',
+    userEmail: '',
     targetUserId: 0,
     courseName: '',
     targetCourseId: -1,
     teacherName: '',
+    courseLocation: '',
     timeValue: '',
     fieldName: '',
     newValue: '',
     ids: [],
     label: '',
     minutePending: false,
-    timeSlots: { year: '', month: '', day: '', hour: '', minute: '' }
+    timeSlots: { year: '', month: '', day: '', hour: '', minute: '' },
+    hasTimeAdjustment: false,
+    adjustMinutes: 0,
+    adjustField: ''
   }
   return op
 }
@@ -788,6 +816,8 @@ function createOperation(intent: string): PendingOperation {
 function resetSessionState(): void {
   sessionState = 'idle'
   pendingOp = null
+  lastUserInput = ''
+  rawUserInput = ''
 }
 
 function setWaiting(op: PendingOperation): void {
@@ -899,6 +929,16 @@ function convertHour(period: string, hour: number): number {
   return hour
 }
 
+function weekdayNumber(value: string): number {
+  if (value == '一') return 1
+  if (value == '二') return 2
+  if (value == '三') return 3
+  if (value == '四') return 4
+  if (value == '五') return 5
+  if (value == '六') return 6
+  return 0
+}
+
 // 支持：2026年11月2号下午4点整 / 11月2号 / 下午4点 / 4点半 / 16:00 / 30分 / 整。
 function extractTimeSlots(text: string): TimeSlots {
   const result = emptyTimeSlots()
@@ -929,6 +969,38 @@ function extractTimeSlots(text: string): TimeSlots {
     if (matched != null) {
       const day = toInt(matched[1])
       if (day >= 1 && day <= 31) result.day = pad2(day)
+    }
+  }
+  if (result.year.length == 0 && result.month.length == 0 && result.day.length == 0) {
+    let dayOffset = -1
+    if (text.includes('今天')) dayOffset = 0
+    else if (text.includes('明天')) dayOffset = 1
+    else if (text.includes('后天')) dayOffset = 2
+    if (dayOffset >= 0) {
+      const now = new Date()
+      const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + dayOffset)
+      result.year = target.getFullYear().toString()
+      result.month = pad2(target.getMonth() + 1)
+      result.day = pad2(target.getDate())
+    } else {
+      matched = new RegExp('(下|本|这)?\\s*(?:周|星期)\\s*([一二三四五六日天])').exec(text)
+      if (matched != null) {
+        const prefix = matched[1]
+        const weekday = weekdayNumber(matched[2])
+        const now = new Date()
+        const current = now.getDay()
+        let offset = 0
+        if (prefix == '下') {
+          const toNextMonday = (8 - current) % 7
+          offset = toNextMonday + (weekday == 0 ? 6 : weekday - 1)
+        } else {
+          offset = (weekday - current + 7) % 7
+        }
+        const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset)
+        result.year = target.getFullYear().toString()
+        result.month = pad2(target.getMonth() + 1)
+        result.day = pad2(target.getDate())
+      }
     }
   }
 
@@ -1003,9 +1075,9 @@ function todayDateParts(): TimeSlots {
   return result
 }
 
-function courseDateParts(course: Course): TimeSlots {
+function datePartsFromDateTime(value: string): TimeSlots {
   const result = emptyTimeSlots()
-  const matched = new RegExp('(\\d{4})-(\\d{1,2})-(\\d{1,2})').exec(course.startTime)
+  const matched = new RegExp('(\\d{4})-(\\d{1,2})-(\\d{1,2})').exec(value)
   if (matched != null) {
     result.year = matched[1]
     result.month = pad2(toInt(matched[2]))
@@ -1017,6 +1089,10 @@ function courseDateParts(course: Course): TimeSlots {
     result.day = pad2(now.getDate())
   }
   return result
+}
+
+function courseDateParts(course: Course): TimeSlots {
+  return datePartsFromDateTime(course.startTime)
 }
 
 function isValidDate(year: number, month: number, day: number): boolean {
@@ -1077,56 +1153,11 @@ function describeHour(hour: string): string {
   return '下午' + (value - 12).toString() + '点'
 }
 
-function describeDateSlots(slots: TimeSlots): string {
-  let result = ''
-  if (slots.month.length > 0) result += toInt(slots.month).toString() + '月'
-  if (slots.day.length > 0) result += toInt(slots.day).toString() + '日'
-  if (result.length == 0 && slots.year.length > 0) result = slots.year + '年'
-  return result
-}
-
 function isDateInputInvalid(slots: TimeSlots): boolean {
   if (slots.month.length == 0 || slots.day.length == 0) return false
   let year = new Date().getFullYear()
   if (slots.year.length > 0) year = toInt(slots.year)
   return !isValidDate(year, toInt(slots.month), toInt(slots.day))
-}
-
-function buildTimePrompt(slots: TimeSlots): string {
-  if (slots.hour.length > 0 && slots.minute.length == 0) {
-    return '已记录为' + describeHour(slots.hour) + '，请问分钟数是多少？'
-  }
-  if (slots.hour.length == 0 && slots.minute.length > 0) {
-    return '已记录分钟为【' + slots.minute + '】，请问具体是几时？'
-  }
-  if (slots.month.length > 0 && slots.day.length == 0) {
-    return '已记录月份为【' + toInt(slots.month).toString() + '月】，请问具体日期（几号）？'
-  }
-  if ((slots.month.length > 0 || slots.day.length > 0) && slots.hour.length == 0) {
-    return '已记录日期为【' + describeDateSlots(slots) + '】，请问具体时间（时和分）是多少？'
-  }
-  if (slots.month.length == 0 && slots.day.length == 0 && slots.year.length > 0 && slots.hour.length == 0) {
-    return '已记录年份为【' + slots.year + '年】，请问具体日期和时间。'
-  }
-  return '请告诉我月份、日期或具体的几时几分。'
-}
-
-function missingTimeSlots(slots: TimeSlots): string[] {
-  const missing: string[] = []
-  if (slots.month.length == 0) missing.push('月份')
-  if (slots.day.length == 0) missing.push('日期')
-  if (slots.hour.length == 0) missing.push('小时')
-  if (slots.minute.length == 0) missing.push('分钟')
-  return missing
-}
-
-function joinWithAnd(parts: string[]): string {
-  let result = ''
-  for (let i = 0; i < parts.length; i++) {
-    if (i > 0) result += '和'
-    result += parts[i]
-  }
-  return result
 }
 
 function parseUserRole(text: string): string {
@@ -1143,24 +1174,87 @@ function toUserRole(role: string): 'student' | 'teacher' | 'admin' {
 }
 
 function parseStudentNo(text: string): string {
-  let matched = new RegExp('(?:学号|工号|编号|studentno)\\s*(?:改为|改成|设置为|为|是|:|：)?\\s*([a-zA-Z0-9]+)', 'i').exec(text)
+  let source = text
+  if (source.includes('手机') || source.includes('电话')) {
+    const phoneMatched = new RegExp('(1[3-9]\\d{9})').exec(source)
+    if (phoneMatched != null) source = removeToken(source, phoneMatched[1])
+  }
+  let matched = new RegExp('(?:学号|工号|编号|studentno)\\s*(?:改为|改成|设置为|为|是|:|：)?\\s*([a-zA-Z0-9]+)', 'i').exec(source)
   if (matched != null) return matched[1].toUpperCase()
-  matched = new RegExp('([a-zA-Z0-9]{3,})').exec(text)
+  matched = new RegExp('([a-zA-Z0-9]{3,})').exec(source)
   if (matched != null) return matched[1].toUpperCase()
   return ''
 }
 
 function parseNameOverride(text: string): string {
-  const matched = new RegExp('(?:姓名|名字)\\s*(?:改成|改为|设置为|是|叫|为|[:：])?\\s*([^\\s，。,.!?；;：:]+)').exec(text)
+  const source = rawUserInput.length > 0 ? rawUserInput : text
+  const matched = new RegExp('(?:姓名|名字)\\s*(?:改成|改为|设置为|是|叫|为|[:：])?\\s*([^\\s，。,.!?；;：:]+)').exec(source)
   if (matched != null) return matched[1]
   return ''
 }
 
 function parseCourseNameOverride(text: string): string {
-  let matched = new RegExp('(?:课程名称|课程名)\\s*(?:改成|改为|设置为|是|叫|为|[:：])?\\s*([^\\s，。,.!?；;：:]+)').exec(text)
+  const source = rawUserInput.length > 0 ? rawUserInput : text
+  let matched = new RegExp('(?:课程名称|课程名)\\s*(?:改成|改为|设置为|是|叫|为|[:：])?\\s*([^\\s，。,.!?；;：:]+)').exec(source)
   if (matched != null) return matched[1]
-  matched = new RegExp('课程\\s*(?:改成|改为|设置为|是|叫|为|[:：])\\s*([^\\s，。,.!?；;：:]+)').exec(text)
+  matched = new RegExp('课程\\s*(?:改成|改为|设置为|是|叫|为|[:：])\\s*([^\\s，。,.!?；;：:]+)').exec(source)
   if (matched != null) return matched[1]
+  return ''
+}
+
+function parsePhone(text: string): string {
+  let matched = new RegExp('(1[3-9]\\d{9})').exec(text)
+  if (matched != null) return matched[1]
+  return ''
+}
+
+function parseEmail(text: string): string {
+  const source = rawUserInput.length > 0 ? rawUserInput : text
+  const matched = new RegExp('([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})').exec(source)
+  if (matched != null) return matched[1]
+  return ''
+}
+
+function parseCourseNewName(text: string): string {
+  const source = rawUserInput.length > 0 ? rawUserInput : text
+  let matched = new RegExp('(?:课程名称|课程名|名称|改名为|更名为|改名)\\s*(?:改成|改为|设置为|是|叫|为|成|[:：])?\\s*([^\\s，。,.!?；;：:]+)').exec(source)
+  if (matched != null) return matched[1]
+  matched = new RegExp('(?:改成|改为|更名为|改名为|改名)\\s*([^\\s，。,.!?；;：:]+)').exec(source)
+  if (matched != null) return matched[1]
+  return ''
+}
+
+function parseCourseLocation(text: string): string {
+  const source = rawUserInput.length > 0 ? rawUserInput : text
+  const matched = new RegExp('(?:地点|位置|教室|地址)\\s*(?:改成|改为|设置为|是|为|到|[:：])?\\s*([^\\s，。,.!?；;：:]+)').exec(source)
+  if (matched != null) return matched[1]
+  return ''
+}
+
+function parseNumberValue(text: string): string {
+  const matched = new RegExp('(-?\\d+(?:\\.\\d+)?)').exec(text)
+  if (matched != null) return matched[1]
+  return ''
+}
+
+function parseUserFieldValue(text: string, field: string): string {
+  if (field == 'studentNo') return parseStudentNo(text)
+  if (field == 'role') return parseUserRole(text)
+  if (field == 'name') {
+    const name = parseNameOverride(text)
+    if (name.length > 0) return name
+    return cleanUserName(rawUserInput.length > 0 ? rawUserInput : text)
+  }
+  if (field == 'phone') return parsePhone(text)
+  if (field == 'email') return parseEmail(text)
+  return ''
+}
+
+function parseCourseFieldValue(text: string, field: string): string {
+  if (field == 'teacher') return parseTeacherName(text)
+  if (field == 'courseName') return parseCourseNewName(text)
+  if (field == 'location') return parseCourseLocation(text)
+  if (field == 'latitude' || field == 'longitude') return parseNumberValue(text)
   return ''
 }
 
@@ -1202,6 +1296,8 @@ function cleanCourseName(text: string): string {
   result = result.replace(/\d{4}\s*年/g, ' ')
   result = result.replace(/\d{1,2}\s*[日号]/g, ' ')
   result = result.replace(/\d{1,2}\s*分/g, ' ')
+  result = result.replace(/(今天|明天|后天)/g, ' ')
+  result = result.replace(/(下|本|这)?\s*(?:周|星期)\s*[一二三四五六日天]/g, ' ')
   const words: string[] = [
     '课程名称', '课程名', '新增', '添加', '创建', '发布', '课程', '一个', '请', '帮我',
     '名为', '叫', '删除', '修改', '更新', '把', '将', '的'
@@ -1277,6 +1373,26 @@ function addMinutesToDateTime(base: string, offset: number): string {
   return formatDateTime(date)
 }
 
+function diffMinutes(from: string, to: string): number {
+  const start = new Date(from.replace(/-/g, '/'))
+  const end = new Date(to.replace(/-/g, '/'))
+  return Math.round((end.getTime() - start.getTime()) / 60000)
+}
+
+function parseTimeAdjustment(text: string): number {
+  const matched = new RegExp('(推迟|延后|提前)\\s*(\\d+)\\s*(小时|分钟|天)').exec(text)
+  if (matched == null) return 0
+  let minutes = toInt(matched[2])
+  if (matched[3] == '小时') minutes = minutes * 60
+  if (matched[3] == '天') minutes = minutes * 1440
+  if (matched[1] == '提前') minutes = -minutes
+  return minutes
+}
+
+function hasTimeAdjustmentText(text: string): boolean {
+  return new RegExp('(推迟|延后|提前)\\s*(\\d+)\\s*(小时|分钟|天)').test(text)
+}
+
 function buildCourseFullTime(course: Course, hour: number, minute: number): string {
   let datePart = datePrefix(0)
   if (course.startTime.length >= 10) datePart = course.startTime.substring(0, 10)
@@ -1289,7 +1405,7 @@ function parseTeacherName(text: string): string {
   for (let i = 0; i < users.length; i++) {
     const user = users[i]
     if (user.role != 'teacher') continue
-    const index = text.lastIndexOf(user.name)
+    const index = text.lastIndexOf(user.name.toLowerCase())
     if (index > lastIndex) {
       lastIndex = index
       found = user.name
@@ -1300,15 +1416,17 @@ function parseTeacherName(text: string): string {
 
 function teacherExists(name: string): boolean {
   if (name.length == 0) return false
+  const target = name.toLowerCase()
   for (let i = 0; i < users.length; i++) {
-    if (users[i].role == 'teacher' && users[i].name == name) return true
+    if (users[i].role == 'teacher' && users[i].name.toLowerCase() == target) return true
   }
   return false
 }
 
 function studentNoExists(studentNo: string, excludeId: number): boolean {
+  const target = studentNo.toUpperCase()
   for (let i = 0; i < users.length; i++) {
-    if (users[i].studentNo == studentNo && users[i].id != excludeId) return true
+    if (users[i].studentNo.toUpperCase() == target && users[i].id != excludeId) return true
   }
   return false
 }
@@ -1329,38 +1447,49 @@ function findCourseById(id: number): Course | null {
 
 function findUserByNamePart(name: string): User | null {
   if (name.length == 0) return null
+  const target = name.toLowerCase()
   for (let i = 0; i < users.length; i++) {
-    if (users[i].name == name) return users[i]
+    if (users[i].name.toLowerCase() == target) return users[i]
   }
   for (let i = 0; i < users.length; i++) {
-    if (users[i].name.includes(name) || users[i].studentNo == name) return users[i]
+    if (users[i].name.toLowerCase().includes(target) || users[i].studentNo.toLowerCase() == target) return users[i]
   }
   return null
 }
 
 function findCourseByNamePart(name: string): Course | null {
   if (name.length == 0) return null
+  const target = name.toLowerCase()
   for (let i = 0; i < courses.length; i++) {
     const course = courses[i]
     if (!isMyCourse(course)) continue
-    if (course.name == name) return course
+    if (course.name.toLowerCase() == target) return course
   }
   for (let i = 0; i < courses.length; i++) {
     const course = courses[i]
     if (!isMyCourse(course)) continue
-    if (course.name.includes(name)) return course
+    if (course.name.toLowerCase().includes(target)) return course
   }
   return null
 }
 
 function detectUserField(text: string): string {
-  if (text.includes('学号') || text.includes('工号') || text.includes('编号') || text.includes('studentno')) return 'studentNo'
+  if (text.includes('手机') || text.includes('电话') || text.includes('phone')) return 'phone'
+  if (text.includes('邮箱') || text.includes('email') || text.includes('邮件')) return 'email'
+  if (text.includes('学号') || text.includes('工号') || text.includes('编号') || text.includes('studentno')
+    || text.includes('账号')) return 'studentNo'
   if (text.includes('角色') || text.includes('身份') || text.includes('role')) return 'role'
   if (text.includes('姓名') || text.includes('名字')) return 'name'
   return ''
 }
 
 function detectCourseField(text: string): string {
+  if (text.includes('课程名') || text.includes('课程名称') || text.includes('改名') || text.includes('名称')) return 'courseName'
+  if (text.includes('签到开始') || text.includes('可签开始')) return 'signStart'
+  if (text.includes('签到结束') || text.includes('可签结束')) return 'signEnd'
+  if (text.includes('纬度') || text.includes('latitude')) return 'latitude'
+  if (text.includes('经度') || text.includes('longitude')) return 'longitude'
+  if (text.includes('地点') || text.includes('位置') || text.includes('教室') || text.includes('地址')) return 'location'
   if (text.includes('老师') || text.includes('教师') || text.includes('授课')) return 'teacher'
   if (text.includes('时间') || text.includes('开课') || text.includes('上课')) return 'time'
   if (text.includes('点') || text.includes(':') || text.includes('：')) return 'time'
@@ -1371,23 +1500,69 @@ function fieldLabel(fieldName: string): string {
   if (fieldName == 'studentNo') return '学号/工号'
   if (fieldName == 'role') return '角色'
   if (fieldName == 'name') return '姓名'
+  if (fieldName == 'phone') return '手机号'
+  if (fieldName == 'email') return '邮箱'
+  if (fieldName == 'courseName') return '课程名称'
   if (fieldName == 'time') return '上课时间'
+  if (fieldName == 'signStart') return '签到开始'
+  if (fieldName == 'signEnd') return '签到结束'
   if (fieldName == 'teacher') return '授课老师'
+  if (fieldName == 'location') return '地点'
+  if (fieldName == 'latitude') return '纬度'
+  if (fieldName == 'longitude') return '经度'
   return fieldName
 }
 
+function isCourseTimeField(fieldName: string): boolean {
+  return fieldName == 'time' || fieldName == 'signStart' || fieldName == 'signEnd'
+}
+
 // ------------------------------ 确认卡片 ------------------------------
+
+function csvActionReply(content: string, title: string, actionText: string, actionType: string): AgentReply {
+  const items: AgentCardItem[] = []
+  const item: AgentCardItem = {
+    title: 'CSV 文件',
+    subtitle: '点击下方按钮继续',
+    badge: 'CSV',
+    badgeType: 'info'
+  }
+  items.push(item)
+  const actions: AgentCardAction[] = []
+  const action: AgentCardAction = {
+    text: actionText,
+    actionType: actionType,
+    status: ''
+  }
+  actions.push(action)
+  const card: AgentCard = {
+    title: title,
+    subtitle: '数据导入 / 导出',
+    count: 1,
+    items: items,
+    actions: actions
+  }
+  return cardReply(content, card)
+}
 
 function buildConfirmCard(content: string, title: string, items: AgentCardItem[]): AgentReply {
   const actions: AgentCardAction[] = []
   const confirmAction: AgentCardAction = {
     text: '确认执行',
-    actionType: 'confirm_execute'
+    actionType: 'confirm_execute',
+    status: ''
   }
   actions.push(confirmAction)
+  const editAction: AgentCardAction = {
+    text: '重新调整',
+    actionType: 'edit_info',
+    status: ''
+  }
+  actions.push(editAction)
   const cancelAction: AgentCardAction = {
     text: '取消',
-    actionType: 'cancel_action'
+    actionType: 'cancel_action',
+    status: ''
   }
   actions.push(cancelAction)
   const card: AgentCard = {
@@ -1441,15 +1616,6 @@ function accountLabel(role: string): string {
   return '账号'
 }
 
-function joinWithDelimiter(parts: string[], delimiter: string): string {
-  let result = ''
-  for (let i = 0; i < parts.length; i++) {
-    if (i > 0) result += delimiter
-    result += parts[i]
-  }
-  return result
-}
-
 function hasCompleteTimeSlots(slots: TimeSlots): boolean {
   return slots.year.length > 0 && slots.month.length > 0 && slots.day.length > 0
     && slots.hour.length > 0 && slots.minute.length > 0
@@ -1484,93 +1650,168 @@ function fillDefaultTimeYear(op: PendingOperation): void {
   }
 }
 
-function buildSlotEcho(op: PendingOperation): string {
-  let echo = ''
-  if (op.intent == 'add_user') {
-    if (op.userName.length > 0) echo += '姓名【' + op.userName + '】，'
-    if (op.userRole.length > 0) echo += '角色【' + roleDisplay(op.userRole) + '】，'
-    if (op.studentNo.length > 0) echo += accountLabel(op.userRole) + '【' + op.studentNo + '】，'
-  } else if (op.intent == 'add_course') {
-    if (op.courseName.length > 0) echo += '课程【' + op.courseName + '】，'
-    if (op.teacherName.length > 0) echo += '老师【' + op.teacherName + '】，'
-    if (hasAnyTimeSlot(op.timeSlots)) echo += '时间【' + describeSlotsText(op.timeSlots) + '】，'
-  } else if (op.intent == 'update_user') {
-    const target = findUserById(op.targetUserId)
-    if (target != null) echo += '用户【' + target.name + '】，'
-    if (op.fieldName.length > 0) {
-      const label = op.fieldName == 'studentNo' && target != null
-        ? accountLabel(target.role) : fieldLabel(op.fieldName)
-      echo += '修改项【' + label + '】，'
-    }
-    if (op.newValue.length > 0) {
-      const value = op.fieldName == 'role' ? roleDisplay(op.newValue) : op.newValue
-      echo += '新值【' + value + '】，'
-    }
-  } else if (op.intent == 'update_course') {
-    const course = findCourseById(op.targetCourseId)
-    if (course != null) echo += '课程【' + course.name + '】，'
-    if (op.fieldName == 'time' && hasAnyTimeSlot(op.timeSlots)) {
-      echo += '时间【' + describeSlotsText(op.timeSlots) + '】，'
-    }
-    if (op.fieldName == 'teacher' && op.newValue.length > 0) {
-      echo += '老师【' + op.newValue + '】，'
-    }
-  } else if (op.intent == 'delete_user') {
-    const target = findUserById(op.targetUserId)
-    if (target != null) echo += '用户【' + target.name + '】，'
-  } else if (op.intent == 'delete_course') {
-    const target = findCourseById(op.targetCourseId)
-    if (target != null) echo += '课程【' + target.name + '】，'
-  } else if (op.intent == 'delete_checkin') {
-    if (op.ids.length > 0) echo += '签到记录【' + op.ids.length.toString() + ' 条】，'
-  }
-
-  if (echo.length == 0) return ''
-  if (echo.substring(echo.length - 1) == '，') echo = echo.substring(0, echo.length - 1)
-  return '当前已记录：' + echo + '。'
+function describeDateSlotsHao(slots: TimeSlots): string {
+  let result = ''
+  if (slots.month.length > 0) result += toInt(slots.month).toString() + '月'
+  if (slots.day.length > 0) result += toInt(slots.day).toString() + '号'
+  return result
 }
 
-function buildSlotMissing(op: PendingOperation): string[] {
-  const missing: string[] = []
-  if (op.intent == 'add_user') {
-    if (op.userName.length == 0) missing.push('姓名')
-    if (op.userRole.length == 0) missing.push('角色（学生/老师）')
-    if (op.studentNo.length == 0) missing.push(accountLabel(op.userRole))
-  } else if (op.intent == 'add_course') {
-    if (op.courseName.length == 0) missing.push('课程名称')
-    if (op.teacherName.length == 0) missing.push('授课老师')
-    if (op.timeValue.length == 0) {
-      if (hasAnyTimeSlot(op.timeSlots)) {
-        const timeMissing = missingTimeSlots(op.timeSlots)
-        for (let i = 0; i < timeMissing.length; i++) missing.push(timeMissing[i])
-      } else {
-        missing.push('开课时间')
-      }
-    }
-  } else if (op.intent == 'update_user') {
-    if (op.targetUserId == 0) missing.push('目标用户')
-    if (op.fieldName.length == 0) missing.push('修改字段（学号/角色/姓名）')
-    if (op.newValue.length == 0) missing.push('新值')
-  } else if (op.intent == 'update_course') {
-    if (op.targetCourseId < 0) missing.push('课程名称')
-    if (op.fieldName.length == 0) missing.push('修改内容（时间/老师）')
-    if (op.fieldName == 'time') {
-      if (hasAnyTimeSlot(op.timeSlots)) {
-        const timeMissing = missingTimeSlots(op.timeSlots)
-        for (let i = 0; i < timeMissing.length; i++) missing.push(timeMissing[i])
-      } else {
-        missing.push('上课时间')
-      }
-    }
-    if (op.fieldName == 'teacher' && op.newValue.length == 0) missing.push('授课老师')
-  } else if (op.intent == 'delete_user') {
-    if (op.targetUserId == 0) missing.push('目标用户')
-  } else if (op.intent == 'delete_course') {
-    if (op.targetCourseId < 0) missing.push('目标课程')
-  } else if (op.intent == 'delete_checkin') {
-    if (op.ids.length == 0) missing.push('签到记录')
+function buildTimeFollowUp(slots: TimeSlots): string {
+  if (slots.month.length > 0 && slots.day.length == 0) {
+    return '月份已记录为' + toInt(slots.month).toString() + '月。请问具体日期和几点几分？'
   }
-  return missing
+  if (slots.hour.length > 0 && slots.minute.length == 0) {
+    return '收到，请问具体是几点几分呢？'
+  }
+  if ((slots.month.length > 0 || slots.day.length > 0) && slots.hour.length == 0) {
+    return '日期已记录为' + describeDateSlotsHao(slots) + '。请问几点几分？'
+  }
+  if (slots.month.length == 0 && slots.day.length == 0 && slots.year.length > 0) {
+    return '年份已记录为' + slots.year + '年。请问具体日期和时间？'
+  }
+  if (slots.hour.length == 0 && slots.minute.length > 0) {
+    return '已记录分钟为' + toInt(slots.minute).toString() + '分。请问几点？'
+  }
+  return ''
+}
+
+function isCorrectionInput(): boolean {
+  return lastUserInput.includes('不对') || lastUserInput.includes('不是')
+    || lastUserInput.includes('改成') || lastUserInput.includes('改为')
+    || lastUserInput.includes('调整')
+}
+
+function buildAddUserPrompt(op: PendingOperation): string {
+  const role = roleDisplay(op.userRole)
+  if (op.userName.length == 0) {
+    if (op.userRole.length == 0 && op.studentNo.length == 0) {
+      return '好的，准备新增用户。请告诉我他的姓名、角色（学生/教师）和账号是多少？'
+    }
+    if (op.userRole.length > 0 && op.studentNo.length == 0) {
+      return '明白，角色设定为【' + role + '】。请问姓名和账号是什么？'
+    }
+    if (op.userRole.length == 0 && op.studentNo.length > 0) {
+      return '收到，账号为【' + op.studentNo + '】。请问姓名和角色是什么？'
+    }
+    return '明白，角色设定为【' + role + '】。请问姓名是什么？'
+  }
+  if (op.userRole.length == 0) {
+    if (op.studentNo.length > 0) {
+      return '收到，用户名为【' + op.userName + '】。请问他是学生还是老师？'
+    }
+    return '收到，用户名为【' + op.userName + '】。请问他是学生还是老师？账号是多少？'
+  }
+  if (op.studentNo.length == 0) {
+    if (isCorrectionInput()) {
+      return '没问题，已调整为' + role + '。那么账号是多少？'
+    }
+    return '明白，角色设定为【' + role + '】。请问该账号是什么？'
+  }
+  return '请继续告诉我需要的信息。'
+}
+
+function buildAddCoursePrompt(op: PendingOperation): string {
+  const hasTime = hasAnyTimeSlot(op.timeSlots) || op.timeValue.length > 0
+  let timeText = op.timeValue
+  if (timeText.length == 0) timeText = describeSlotsText(op.timeSlots)
+  if (op.courseName.length == 0) {
+    if (!hasTime) return '准备新增课程。请告诉我课程名称和开课时间？'
+    return '收到，开课时间设为【' + timeText + '】。请问课程名称是什么？'
+  }
+  if (!hasTime) {
+    return '好的，课程名为【' + op.courseName + '】。请问开课时间是什么时候？（如：明天下午3点）'
+  }
+  if (op.timeValue.length == 0) {
+    const followUp = buildTimeFollowUp(op.timeSlots)
+    if (followUp.length > 0) return followUp
+    return '好的，课程名为【' + op.courseName + '】。请问开课时间是什么时候？'
+  }
+  if (op.teacherName.length == 0) {
+    return '好的，课程信息已收到。请问授课老师是哪位？'
+  }
+  return '请继续告诉我需要的信息。'
+}
+
+function buildUpdateCoursePrompt(op: PendingOperation): string {
+  if (op.targetCourseId < 0) {
+    if (isCourseTimeField(op.fieldName) && (hasAnyTimeSlot(op.timeSlots) || op.hasTimeAdjustment)) {
+      return '收到，时间信息已记录。请告诉我您要修改哪门课程的信息？'
+    }
+    if (op.fieldName == 'teacher' && op.newValue.length > 0) {
+      return '收到，老师已记录。请告诉我您要修改哪门课程的信息？'
+    }
+    if (op.fieldName == 'courseName' && op.newValue.length > 0) {
+      return '收到，新的课程名称已记录。请告诉我您要修改哪门课程的信息？'
+    }
+    if (op.fieldName == 'location' && op.newValue.length > 0) {
+      return '收到，地点已记录。请告诉我您要修改哪门课程的信息？'
+    }
+    return '请告诉我您要修改哪门课程的信息？'
+  }
+  const course = findCourseById(op.targetCourseId)
+  const name = course == null ? op.courseName : course.name
+  if (op.fieldName.length == 0) {
+    return '好的，正在修改【' + name + '】。您要修改课程名称、时间、地点、经纬度还是授课老师？'
+  }
+  if (isCourseTimeField(op.fieldName)) {
+    if (hasAnyTimeSlot(op.timeSlots)) {
+      const followUp = buildTimeFollowUp(op.timeSlots)
+      if (followUp.length > 0) return followUp
+    }
+    return '好的，正在修改【' + name + '】。请告诉我新的' + fieldLabel(op.fieldName) + '。'
+  }
+  if (op.fieldName == 'teacher') {
+    return '好的，正在修改【' + name + '】。请告诉我要改成哪位老师？'
+  }
+  if (op.fieldName == 'courseName') {
+    return '好的，正在修改【' + name + '】。请告诉我新的课程名称。'
+  }
+  if (op.fieldName == 'location') {
+    return '好的，正在修改【' + name + '】。请告诉我新的上课地点。'
+  }
+  if (op.fieldName == 'latitude') {
+    return '好的，正在修改【' + name + '】。请输入新的纬度（-90 到 90）。'
+  }
+  if (op.fieldName == 'longitude') {
+    return '好的，正在修改【' + name + '】。请输入新的经度（-180 到 180）。'
+  }
+  return '好的，正在修改【' + name + '】。请告诉我需要调整的信息。'
+}
+
+function buildUpdateUserPrompt(op: PendingOperation): string {
+  const target = findUserById(op.targetUserId)
+  if (target == null) return '请告诉我您要修改哪位用户的信息？'
+  if (op.fieldName.length == 0) {
+    return '好的，正在修改用户【' + target.name + '】。您要修改'
+      + accountLabel(target.role) + '、角色、姓名、手机号还是邮箱？'
+  }
+  if (op.newValue.length == 0) {
+    if (op.fieldName == 'studentNo') return '好的，请输入新的' + accountLabel(target.role) + '。'
+    if (op.fieldName == 'role') return '好的，请告诉我要改成什么角色（学生/老师/管理员）？'
+    if (op.fieldName == 'name') return '好的，请输入新的姓名。'
+    if (op.fieldName == 'phone') return '好的，请输入新的手机号。'
+    if (op.fieldName == 'email') return '好的，请输入新的邮箱。'
+  }
+  return '好的，请继续补充需要修改的信息。'
+}
+
+function buildDeletePrompt(op: PendingOperation): string {
+  if (op.intent == 'delete_user') return '请告诉我要删除哪位用户？'
+  if (op.intent == 'delete_course') return '请告诉我要删除哪门课程？'
+  if (op.intent == 'delete_checkin') return '请指定要删除的签到记录。'
+  return '请继续告诉我需要的信息。'
+}
+
+function buildSlotPromptText(op: PendingOperation): string {
+  if (op.intent == 'add_user') return buildAddUserPrompt(op)
+  if (op.intent == 'add_course') return buildAddCoursePrompt(op)
+  if (op.intent == 'update_user') return buildUpdateUserPrompt(op)
+  if (op.intent == 'update_course') return buildUpdateCoursePrompt(op)
+  if (op.intent == 'delete_user' || op.intent == 'delete_course' || op.intent == 'delete_checkin') {
+    return buildDeletePrompt(op)
+  }
+  return '请继续告诉我需要的信息。'
 }
 
 function buildSlotPrompt(op: PendingOperation): AgentReply {
@@ -1578,27 +1819,46 @@ function buildSlotPrompt(op: PendingOperation): AgentReply {
 }
 
 function buildSlotPromptWithPrefix(op: PendingOperation, prefix: string): AgentReply {
-  const echo = buildSlotEcho(op)
-  const missing = buildSlotMissing(op)
-  let content = prefix
-  if (echo.length > 0) content += echo + ' '
-  if (missing.length > 0) {
-    content += '请补充【' + joinWithDelimiter(missing, '、') + '】。'
-  } else {
-    content += '信息已齐全，正在生成确认。'
-  }
-  content += '\n（提示：您可以随时修改已填信息，例如输入“姓名改成王五”）'
   setWaiting(op)
-  return textReply(content)
+  return textReply(prefix + buildSlotPromptText(op))
 }
 
-function buildInfoLine(op: PendingOperation): string {
+function operationCardTitle(op: PendingOperation): string {
+  if (op.intent == 'update_course') {
+    if (op.fieldName == 'time') return '修改课程时间'
+    if (op.fieldName == 'signStart') return '修改签到开始时间'
+    if (op.fieldName == 'signEnd') return '修改签到结束时间'
+    if (op.fieldName == 'teacher') return '修改课程老师'
+    if (op.fieldName == 'courseName') return '修改课程名称'
+    if (op.fieldName == 'location') return '修改课程地点'
+    if (op.fieldName == 'latitude') return '修改课程纬度'
+    if (op.fieldName == 'longitude') return '修改课程经度'
+  }
+  if (op.intent == 'update_user') {
+    if (op.fieldName == 'studentNo') {
+      const target = findUserById(op.targetUserId)
+      return '修改用户' + (target == null ? '账号' : accountLabel(target.role))
+    }
+    if (op.fieldName == 'role') return '修改用户角色'
+    if (op.fieldName == 'name') return '修改用户姓名'
+    if (op.fieldName == 'phone') return '修改用户手机号'
+    if (op.fieldName == 'email') return '修改用户邮箱'
+  }
+  return operationTitle(op.intent)
+}
+
+function buildCardSummary(op: PendingOperation): string {
   if (op.intent == 'add_user') {
-    return '姓名【' + op.userName + '】，角色【' + roleDisplay(op.userRole) + '】，'
-      + accountLabel(op.userRole) + '【' + op.studentNo + '】'
+    let summary = '姓名 ' + op.userName + '，角色 ' + roleDisplay(op.userRole) + '，'
+      + accountLabel(op.userRole) + ' ' + op.studentNo
+    if (op.userPhone.length > 0) summary += '，手机 ' + op.userPhone
+    if (op.userEmail.length > 0) summary += '，邮箱 ' + op.userEmail
+    return summary
   }
   if (op.intent == 'add_course') {
-    return '课程【' + op.courseName + '】，时间【' + op.timeValue + '】，老师【' + op.teacherName + '】'
+    let summary = '《' + op.courseName + '》，时间 ' + op.timeValue + '，老师 ' + op.teacherName
+    if (op.courseLocation.length > 0) summary += '，地点 ' + op.courseLocation
+    return summary
   }
   if (op.intent == 'update_user') {
     const target = findUserById(op.targetUserId)
@@ -1606,33 +1866,49 @@ function buildInfoLine(op: PendingOperation): string {
     const value = op.fieldName == 'role' ? roleDisplay(op.newValue) : op.newValue
     const label = op.fieldName == 'studentNo' && target != null
       ? accountLabel(target.role) : fieldLabel(op.fieldName)
-    return '用户【' + name + '】，' + label + '【' + value + '】'
+    return '将《' + name + '》的' + label + '改为 ' + value
   }
   if (op.intent == 'update_course') {
     const course = findCourseById(op.targetCourseId)
     const name = course == null ? op.courseName : course.name
-    if (op.fieldName == 'time') {
-      return '课程【' + name + '】，上课时间【' + op.timeValue + '】'
+    if (isCourseTimeField(op.fieldName)) {
+      return '将《' + name + '》' + fieldLabel(op.fieldName) + '改为 ' + op.timeValue
     }
-    return '课程【' + name + '】，授课老师【' + op.newValue + '】'
+    if (op.fieldName == 'teacher') {
+      return '将《' + name + '》授课老师改为 ' + op.newValue
+    }
+    if (op.fieldName == 'courseName') {
+      return '将《' + name + '》课程名称改为 ' + op.newValue
+    }
+    if (op.fieldName == 'location') {
+      return '将《' + name + '》地点改为 ' + op.newValue
+    }
+    if (op.fieldName == 'latitude') {
+      return '将《' + name + '》纬度改为 ' + op.newValue
+    }
+    if (op.fieldName == 'longitude') {
+      return '将《' + name + '》经度改为 ' + op.newValue
+    }
+    return '将《' + name + '》信息更新为 ' + op.newValue
   }
   if (op.intent == 'delete_user') {
     const target = findUserById(op.targetUserId)
-    return '用户【' + (target == null ? op.userName : target.name) + '】'
+    return '删除《' + (target == null ? op.userName : target.name) + '》'
   }
   if (op.intent == 'delete_course') {
     const target = findCourseById(op.targetCourseId)
-    return '课程【' + (target == null ? op.courseName : target.name) + '】'
+    return '删除《' + (target == null ? op.courseName : target.name) + '》'
   }
   if (op.intent == 'delete_checkin') {
-    return '签到记录【' + op.ids.length.toString() + ' 条】'
+    return '共 ' + op.ids.length.toString() + ' 条签到记录'
   }
   return ''
 }
 
 function buildFinalConfirm(op: PendingOperation, items: AgentCardItem[]): AgentReply {
-  const title = operationTitle(op.intent)
-  const content = '即将执行操作：【' + title + '】。\n信息确认：' + buildInfoLine(op) + '。\n请点击下方按钮确认。'
+  const title = operationCardTitle(op)
+  const content = '信息已为您整理好，请核对下方卡片：\n【' + title + '】' + buildCardSummary(op)
+    + '。\n（确认无误请点击执行，或点击重新调整）'
   return buildConfirmCard(content, title + '确认', items)
 }
 
@@ -1641,6 +1917,10 @@ function buildFinalConfirm(op: PendingOperation, items: AgentCardItem[]): AgentR
 function isUnknownInput(text: string): boolean {
   return text.includes('不知道') || text.includes('不清楚') || text.includes('不记得')
     || text.includes('随便') || text.includes('乱码') || text.includes('没有') || text == '无'
+    || text.includes('你好') || text.includes('您好') || text.includes('谢谢')
+    || text.includes('在吗') || text.includes('哈喽') || text == 'hello'
+    || text == 'hi' || text.includes('干嘛')
+    || text.includes('为什么') || text.includes('怎么')
 }
 
 function applyAddUserOverrides(op: PendingOperation, text: string): boolean {
@@ -1660,6 +1940,16 @@ function applyAddUserOverrides(op: PendingOperation, text: string): boolean {
     op.studentNo = studentNo
     hasNewInfo = true
   }
+  const phone = parsePhone(text)
+  if (phone.length > 0) {
+    op.userPhone = phone
+    hasNewInfo = true
+  }
+  const email = parseEmail(text)
+  if (email.length > 0) {
+    op.userEmail = email
+    hasNewInfo = true
+  }
   if (op.userName.length == 0) {
     const mentioned = findMentionedUsers(text)
     if (mentioned.length == 1) {
@@ -1669,7 +1959,7 @@ function applyAddUserOverrides(op: PendingOperation, text: string): boolean {
   }
   if (op.userName.length == 0 && !isUnknownInput(text)
     && text.includes('姓名') == false && text.includes('名字') == false) {
-    let nameSource = text
+    let nameSource = rawUserInput.length > 0 ? rawUserInput : text
     if (studentNo.length > 0) nameSource = removeToken(nameSource, studentNo)
     if (userRole.length > 0) {
       nameSource = removeToken(nameSource, '学生')
@@ -1696,16 +1986,28 @@ function applyAddCourseOverrides(op: PendingOperation, text: string): boolean {
   }
   const teacher = parseTeacherName(text)
   const courseName = parseCourseNameOverride(text)
+  const location = parseCourseLocation(text)
+  if (location.length > 0) {
+    op.courseLocation = location
+    hasNewInfo = true
+  }
   if (courseName.length > 0) {
     op.courseName = courseName
     hasNewInfo = true
   } else if (op.courseName.length == 0 && !isUnknownInput(text)) {
-    let nameSource = text
+    let nameSource = rawUserInput.length > 0 ? rawUserInput : text
     if (teacher.length > 0) {
       nameSource = removeToken(nameSource, teacher)
       nameSource = removeToken(nameSource, '老师')
       nameSource = removeToken(nameSource, '教师')
       nameSource = removeToken(nameSource, '授课')
+    }
+    if (location.length > 0) {
+      nameSource = removeToken(nameSource, location)
+      nameSource = removeToken(nameSource, '地点')
+      nameSource = removeToken(nameSource, '位置')
+      nameSource = removeToken(nameSource, '教室')
+      nameSource = removeToken(nameSource, '地址')
     }
     const simpleName = cleanCourseName(nameSource)
     if (simpleName.length > 0 && simpleName != '老师' && simpleName != '教师'
@@ -1764,9 +2066,22 @@ function applyUpdateUserOverrides(op: PendingOperation, text: string): boolean {
       hasNewInfo = true
     }
   } else if (op.fieldName == 'name') {
-    const name = parseNameOverride(text)
+    let name = parseNameOverride(text)
+    if (name.length == 0) name = cleanUserName(rawUserInput.length > 0 ? rawUserInput : text)
     if (name.length > 0) {
       op.newValue = name
+      hasNewInfo = true
+    }
+  } else if (op.fieldName == 'phone') {
+    const phone = parsePhone(text)
+    if (phone.length > 0) {
+      op.newValue = phone
+      hasNewInfo = true
+    }
+  } else if (op.fieldName == 'email') {
+    const email = parseEmail(text)
+    if (email.length > 0) {
+      op.newValue = email
       hasNewInfo = true
     }
   }
@@ -1803,21 +2118,77 @@ function applyUpdateCourseOverrides(op: PendingOperation, text: string): boolean
       }
     }
   }
-  const time = extractTimeSkill(text)
-  if (hasAnyTimeSlot(time)) {
-    op.timeSlots = mergeTimeSlots(op.timeSlots, time)
-    if (op.fieldName != 'teacher') op.fieldName = 'time'
-    hasNewInfo = true
-  }
+
   const field = detectCourseField(text)
   if (field.length > 0) {
     op.fieldName = field
     hasNewInfo = true
   }
+  if (op.fieldName.length == 0 && op.targetCourseId >= 0
+    && (text.includes('改成') || text.includes('改为'))) {
+    const changedName = parseCourseNewName(text)
+    if (changedName.length > 0 && changedName != op.courseName) op.fieldName = 'courseName'
+  }
+
+  if (hasTimeAdjustmentText(text)) {
+    const adjustField = (op.fieldName == 'signStart' || op.fieldName == 'signEnd' || op.fieldName == 'time')
+      ? op.fieldName : 'time'
+    op.hasTimeAdjustment = true
+    op.adjustMinutes = parseTimeAdjustment(text)
+    op.adjustField = adjustField
+    op.fieldName = adjustField
+    hasNewInfo = true
+  }
+
+  const time = extractTimeSkill(text)
+  if (hasAnyTimeSlot(time)) {
+    op.timeSlots = mergeTimeSlots(op.timeSlots, time)
+    if (!hasTimeAdjustmentText(text)) {
+      op.hasTimeAdjustment = false
+      op.adjustMinutes = 0
+      op.adjustField = ''
+    }
+    if (op.fieldName.length == 0 || op.fieldName == 'time'
+      || op.fieldName == 'signStart' || op.fieldName == 'signEnd') {
+      if (op.fieldName.length == 0) op.fieldName = 'time'
+    } else {
+      // 其他字段文本中顺带出现的时间不覆盖当前字段。
+    }
+    hasNewInfo = true
+  }
+
   if (op.fieldName == 'teacher') {
     const teacher = parseTeacherName(text)
     if (teacher.length > 0) {
       op.newValue = teacher
+      hasNewInfo = true
+    }
+  } else if (op.fieldName == 'courseName') {
+    let newName = parseCourseNewName(text)
+    if (newName.length == 0
+      && !text.includes('课程名') && !text.includes('名称') && !text.includes('改名')
+      && !isUnknownInput(text)) {
+      newName = rawUserInput.length > 0 ? rawUserInput.trim() : text.trim()
+    }
+    if (newName.length > 0) {
+      op.newValue = newName
+      hasNewInfo = true
+    }
+  } else if (op.fieldName == 'location') {
+    let location = parseCourseLocation(text)
+    if (location.length == 0
+      && !text.includes('地点') && !text.includes('位置') && !text.includes('教室') && !text.includes('地址')
+      && !isUnknownInput(text)) {
+      location = rawUserInput.length > 0 ? rawUserInput.trim() : text.trim()
+    }
+    if (location.length > 0) {
+      op.newValue = location
+      hasNewInfo = true
+    }
+  } else if (op.fieldName == 'latitude' || op.fieldName == 'longitude') {
+    const numberValue = parseNumberValue(text)
+    if (numberValue.length > 0) {
+      op.newValue = numberValue
       hasNewInfo = true
     }
   }
@@ -1942,9 +2313,11 @@ function advanceAddUser(op: PendingOperation): AgentReply {
 function startAddUser(text: string): AgentReply {
   if (isTeacherMode()) return textReply('权限不足，新增用户仅管理员可用。')
   const op = createOperation('add_user')
-  op.userName = cleanUserName(text)
+  op.userName = cleanUserName(rawUserInput.length > 0 ? rawUserInput : text)
   op.studentNo = parseStudentNo(text)
   op.userRole = parseUserRole(text)
+  op.userPhone = parsePhone(text)
+  op.userEmail = parseEmail(text)
   return advanceAddUser(op)
 }
 
@@ -2019,7 +2392,15 @@ function startAddCourse(text: string): AgentReply {
   }
   const time = extractTimeSkill(text)
   if (hasAnyTimeSlot(time)) op.timeSlots = mergeTimeSlots(op.timeSlots, time)
-  let nameSource = text
+  op.courseLocation = parseCourseLocation(text)
+  let nameSource = rawUserInput.length > 0 ? rawUserInput : text
+  if (op.courseLocation.length > 0) {
+    nameSource = removeToken(nameSource, op.courseLocation)
+    nameSource = removeToken(nameSource, '地点')
+    nameSource = removeToken(nameSource, '位置')
+    nameSource = removeToken(nameSource, '教室')
+    nameSource = removeToken(nameSource, '地址')
+  }
   const mentionedUsers = findMentionedUsers(text)
   for (let i = 0; i < mentionedUsers.length; i++) {
     nameSource = removeToken(nameSource, mentionedUsers[i].name)
@@ -2071,6 +2452,14 @@ function advanceUpdateUser(op: PendingOperation): AgentReply {
     op.newValue = ''
     return buildSlotPromptWithPrefix(op, '角色只能是学生 / 老师 / 管理员。\n')
   }
+  if (op.fieldName == 'phone' && !new RegExp('^1[3-9]\\d{9}$').test(op.newValue)) {
+    op.newValue = ''
+    return buildSlotPromptWithPrefix(op, '手机号格式不正确，请重新输入 11 位手机号。\n')
+  }
+  if (op.fieldName == 'email' && !new RegExp('^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$').test(op.newValue)) {
+    op.newValue = ''
+    return buildSlotPromptWithPrefix(op, '邮箱格式不正确，请重新输入。\n')
+  }
   const displayValue = op.fieldName == 'role' ? roleDisplay(op.newValue) : op.newValue
   const items: AgentCardItem[] = []
   const item1: AgentCardItem = {
@@ -2119,12 +2508,8 @@ function startUpdateUser(text: string): AgentReply {
     }
   }
   op.fieldName = detectUserField(text)
-  if (op.fieldName == 'studentNo') {
-    op.newValue = parseStudentNo(text)
-  } else if (op.fieldName == 'role') {
-    op.newValue = parseUserRole(text)
-  } else if (op.fieldName == 'name') {
-    op.newValue = parseNameOverride(text)
+  if (op.fieldName.length > 0) {
+    op.newValue = parseUserFieldValue(text, op.fieldName)
   }
   if (op.fieldName.length == 0) {
     const roleValue = parseUserRole(text)
@@ -2192,18 +2577,30 @@ function advanceUpdateCourse(op: PendingOperation): AgentReply {
   if (op.fieldName.length == 0) {
     return buildSlotPrompt(op)
   }
-  if (op.fieldName == 'time') {
-    const base = courseDateParts(course)
-    const resolved = resolveTimeSlots(op.timeSlots, base)
-    if (resolved == null) {
-      if (isDateInputInvalid(op.timeSlots)) {
-        op.timeSlots.day = ''
-        return buildSlotPromptWithPrefix(op, '日期无效，请重新告诉我月份和日期。\n')
+  const isTimeField = op.fieldName == 'time' || op.fieldName == 'signStart' || op.fieldName == 'signEnd'
+  if (isTimeField) {
+    if (op.hasTimeAdjustment) {
+      let baseValue = course.startTime
+      if (op.adjustField == 'signStart') baseValue = course.signStart
+      else if (op.adjustField == 'signEnd') baseValue = course.signEnd
+      op.timeValue = addMinutesToDateTime(baseValue, op.adjustMinutes)
+      op.timeSlots = datePartsFromDateTime(op.timeValue)
+    } else {
+      let baseValue = course.startTime
+      if (op.fieldName == 'signStart') baseValue = course.signStart
+      else if (op.fieldName == 'signEnd') baseValue = course.signEnd
+      const base = datePartsFromDateTime(baseValue)
+      const resolved = resolveTimeSlots(op.timeSlots, base)
+      if (resolved == null) {
+        if (isDateInputInvalid(op.timeSlots)) {
+          op.timeSlots.day = ''
+          return buildSlotPromptWithPrefix(op, '日期无效，请重新告诉我月份和日期。\n')
+        }
+        return buildSlotPrompt(op)
       }
-      return buildSlotPrompt(op)
+      op.timeSlots = resolved
+      op.timeValue = formatTimeSlots(resolved)
     }
-    op.timeSlots = resolved
-    op.timeValue = formatTimeSlots(resolved)
   }
   if (op.fieldName == 'teacher') {
     if (op.newValue.length == 0) {
@@ -2214,6 +2611,28 @@ function advanceUpdateCourse(op: PendingOperation): AgentReply {
       return buildSlotPromptWithPrefix(op, '没有找到该教师，请提供系统中已有的教师姓名。\n')
     }
   }
+  if (op.fieldName == 'courseName' && op.newValue.length == 0) {
+    return buildSlotPrompt(op)
+  }
+  if (op.fieldName == 'location' && op.newValue.length == 0) {
+    return buildSlotPrompt(op)
+  }
+  if (op.fieldName == 'latitude' || op.fieldName == 'longitude') {
+    if (op.newValue.length == 0) return buildSlotPrompt(op)
+    const numberValue = Number(op.newValue)
+    if (isNaN(numberValue)) {
+      op.newValue = ''
+      return buildSlotPromptWithPrefix(op, '请输入有效的数字。\n')
+    }
+    if (op.fieldName == 'latitude' && (numberValue < -90 || numberValue > 90)) {
+      op.newValue = ''
+      return buildSlotPromptWithPrefix(op, '纬度需要在 -90 到 90 之间。\n')
+    }
+    if (op.fieldName == 'longitude' && (numberValue < -180 || numberValue > 180)) {
+      op.newValue = ''
+      return buildSlotPromptWithPrefix(op, '经度需要在 -180 到 180 之间。\n')
+    }
+  }
   const items: AgentCardItem[] = []
   const item1: AgentCardItem = {
     title: course.name,
@@ -2222,12 +2641,7 @@ function advanceUpdateCourse(op: PendingOperation): AgentReply {
     badgeType: 'warn'
   }
   items.push(item1)
-  let displayValue = ''
-  if (op.fieldName == 'time') {
-    displayValue = op.timeValue
-  } else {
-    displayValue = op.newValue
-  }
+  const displayValue = isTimeField ? op.timeValue : op.newValue
   const item2: AgentCardItem = {
     title: fieldLabel(op.fieldName),
     subtitle: '修改字段',
@@ -2538,6 +2952,8 @@ function executePendingOperation(): AgentReply {
       studentNo: op.studentNo,
       role: toUserRole(op.userRole)
     }
+    if (op.userPhone.length > 0) newUser.phone = op.userPhone
+    if (op.userEmail.length > 0) newUser.email = op.userEmail
     users.push(newUser)
     return textReply('已新增用户：' + op.userName + '(' + op.studentNo + ') / ' + roleText(op.userRole) + '。')
   }
@@ -2560,6 +2976,7 @@ function executePendingOperation(): AgentReply {
       signEnd: addMinutesToDateTime(op.timeValue, 20),
       teacherName: teacherName
     }
+    if (op.courseLocation.length > 0) newCourse.location = op.courseLocation
     courses.push(newCourse)
     return textReply('已新增课程：' + op.courseName + ' / ' + op.timeValue + ' / ' + teacherName + '。')
   }
@@ -2579,7 +2996,18 @@ function executePendingOperation(): AgentReply {
     }
     if (op.fieldName == 'name') {
       target.name = op.newValue
+      for (let i = 0; i < checkinTable.length; i++) {
+        if (checkinTable[i].userId === target.id) checkinTable[i].userName = op.newValue
+      }
       return textReply('修改成功：用户姓名已更新为「' + op.newValue + '」。')
+    }
+    if (op.fieldName == 'phone') {
+      target.phone = op.newValue
+      return textReply('修改成功：用户「' + target.name + '」的手机号已更新为 ' + op.newValue + '。')
+    }
+    if (op.fieldName == 'email') {
+      target.email = op.newValue
+      return textReply('修改成功：用户「' + target.name + '」的邮箱已更新为 ' + op.newValue + '。')
     }
     return textReply('未识别的修改字段，操作已取消。')
   }
@@ -2588,14 +3016,44 @@ function executePendingOperation(): AgentReply {
     const target = findCourseById(op.targetCourseId)
     if (target == null) return textReply('课程已不存在，操作已取消。')
     if (isTeacherMode() && !isMyCourse(target)) return textReply('权限不足，教师只能修改自己的课程。')
-    if (op.fieldName == 'time') {
-      target.startTime = op.timeValue
-      return textReply('修改成功：课程「' + target.name + '」的上课时间已更新为 ' + op.timeValue + '。')
+    if (isCourseTimeField(op.fieldName)) {
+      if (op.fieldName == 'time') {
+        const delta = diffMinutes(target.startTime, op.timeValue)
+        target.startTime = op.timeValue
+        if (delta != 0) {
+          target.signStart = addMinutesToDateTime(target.signStart, delta)
+          target.signEnd = addMinutesToDateTime(target.signEnd, delta)
+        }
+        return textReply('修改成功：课程「' + target.name + '」的上课时间已更新为 ' + op.timeValue + '，签到窗口已同步调整。')
+      }
+      if (op.fieldName == 'signStart') target.signStart = op.timeValue
+      else if (op.fieldName == 'signEnd') target.signEnd = op.timeValue
+      return textReply('修改成功：课程「' + target.name + '」的' + fieldLabel(op.fieldName) + '已更新为 ' + op.timeValue + '。')
     }
     if (op.fieldName == 'teacher') {
       if (!teacherExists(op.newValue)) return textReply('授课老师无效，操作已取消。')
       target.teacherName = op.newValue
       return textReply('修改成功：课程「' + target.name + '」的授课老师已更新为 ' + op.newValue + '。')
+    }
+    if (op.fieldName == 'courseName') {
+      const oldName = target.name
+      target.name = op.newValue
+      for (let i = 0; i < checkinTable.length; i++) {
+        if (checkinTable[i].courseId === target.id) checkinTable[i].courseName = op.newValue
+      }
+      return textReply('修改成功：课程「' + oldName + '」已更名为「' + op.newValue + '」。')
+    }
+    if (op.fieldName == 'location') {
+      target.location = op.newValue
+      return textReply('修改成功：课程「' + target.name + '」的地点已更新为 ' + op.newValue + '。')
+    }
+    if (op.fieldName == 'latitude') {
+      target.latitude = Number(op.newValue)
+      return textReply('修改成功：课程「' + target.name + '」的纬度已更新为 ' + op.newValue + '。')
+    }
+    if (op.fieldName == 'longitude') {
+      target.longitude = Number(op.newValue)
+      return textReply('修改成功：课程「' + target.name + '」的经度已更新为 ' + op.newValue + '。')
     }
     return textReply('未识别的修改字段，操作已取消。')
   }
@@ -2652,7 +3110,7 @@ function executePendingOperation(): AgentReply {
 
 function detectWriteIntent(text: string): string {
   const hasAdd = hasWord(text, ['新增', '添加', '创建', '生成', '发布'])
-  const hasUpdate = hasWord(text, ['修改', '更新', '调整', '改为', '改成', '设置为', '设成'])
+  const hasUpdate = hasWord(text, ['修改', '更新', '调整', '改为', '改成', '设置为', '设成', '推迟', '延后', '提前', '改到', '改名', '更名为'])
   const hasDelete = hasWord(text, DELETE_WORDS)
 
   if (hasAdd) {
@@ -2671,6 +3129,9 @@ function detectWriteIntent(text: string): string {
   }
 
   if (hasUpdate) {
+    if (text.includes('签到开始') || text.includes('签到结束') || text.includes('可签开始') || text.includes('可签结束')) {
+      return 'update_course'
+    }
     if (hasWord(text, CHECKIN_WORDS) || text.includes('记录')) return 'update_checkin'
     if (text.includes('课程') || text.includes('时间') || text.includes('开课') || text.includes('上课')) return 'update_course'
     if (text.includes('用户') || text.includes('人员') || text.includes('学生') || text.includes('老师') || text.includes('教师')) return 'update_user'
@@ -2708,7 +3169,7 @@ function advanceOperation(op: PendingOperation): AgentReply {
 
 // ------------------------------ 统一入口 ------------------------------
 
-export function processMessage(raw: string, role: string, teacherName: string): AgentReply {
+function processMessageCore(raw: string, role: string, teacherName: string): AgentReply {
   currentRole = role
   currentTeacherName = teacherName
 
@@ -2718,6 +3179,8 @@ export function processMessage(raw: string, role: string, teacherName: string): 
 
   const text = normalizeInput(trimmed)
   if (text.length == 0) return errorReply(REFUSAL_MESSAGE)
+  lastUserInput = text
+  rawUserInput = trimmed
 
   // 安全拦截永远优先于业务状态。
   if (hitBlacklist(text)) {
@@ -2725,10 +3188,32 @@ export function processMessage(raw: string, role: string, teacherName: string): 
     return errorReply(REFUSAL_MESSAGE)
   }
 
+  // 最高优先级业务中断：等待参数/确认期间，取消类词汇直接终止当前操作。
+  const normalizedInput = text.replace(/\s+/g, '')
+  const interruptKeywords: string[] = ['取消', '算了', '退出', '终止', '不弄了', '停止', '重来']
+  let isInterrupt = false
+  for (let i = 0; i < interruptKeywords.length; i++) {
+    if (normalizedInput.includes(interruptKeywords[i])) {
+      isInterrupt = true
+      break
+    }
+  }
+  if (isInterrupt && sessionState != 'idle') {
+    resetSessionState()
+    return textReply(CANCEL_MESSAGE)
+  }
+
   // 卡片按钮内置指令。
   if (text.includes('/cancel_action')) {
     resetSessionState()
-    return textReply('已取消本次操作。')
+    return textReply(CANCEL_MESSAGE)
+  }
+  if (text.includes('/edit_info') || text.includes('重新调整')) {
+    if (sessionState != 'awaiting_confirm' || pendingOp == null) {
+      return textReply('当前没有可调整的操作。')
+    }
+    setWaiting(pendingOp)
+    return textReply('好的，您可以重新告诉我需要调整的信息（例如：‘时间改成明天下午3点’或‘名字改成张三’）。')
   }
   if (text.includes('/confirm_execute') || text.includes('/confirm_delete') || text.includes('/confirm_update')) {
     if (sessionState != 'awaiting_confirm' || pendingOp == null) {
@@ -2741,17 +3226,18 @@ export function processMessage(raw: string, role: string, teacherName: string): 
   if (sessionState == 'awaiting_slots') {
     if (isCancel(text) || text.includes('取消')) {
       resetSessionState()
-      return textReply('已取消本次操作。')
+      return textReply(CANCEL_MESSAGE)
     }
     const op = pendingOp
     if (op != null) {
       if (text == '确认' || text == '确认执行' || text == '确定' || text == '执行'
         || text == '确认修改' || text == '确认删除') {
-        return buildSlotPromptWithPrefix(op, '信息还未填写完整，请先补充。\n')
+        return advanceOperation(op)
       }
       const hasNewInfo = applySlotOverrides(op, text)
       if (!hasNewInfo) {
-        return buildSlotPromptWithPrefix(op, '未能识别新增信息，请按提示补充或修改。\n')
+        setWaiting(op)
+        return textReply('抱歉，我没太理解。请问您是想要继续当前的操作（请提供缺失的信息），还是想重新开始（输入‘取消’）？')
       }
       return advanceOperation(op)
     }
@@ -2762,7 +3248,7 @@ export function processMessage(raw: string, role: string, teacherName: string): 
   if (sessionState == 'awaiting_confirm') {
     if (isCancel(text) || text.includes('取消')) {
       resetSessionState()
-      return textReply('已取消本次操作。')
+      return textReply(CANCEL_MESSAGE)
     }
     if (text == '确认' || text == '确认执行' || text == '确定' || text == '执行'
       || text == '确认修改' || text == '确认删除') {
@@ -2782,6 +3268,32 @@ export function processMessage(raw: string, role: string, teacherName: string): 
   if (text == '确认' || text == '确认执行' || text == '确定' || text == '执行'
     || text == '确认修改' || text == '确认删除') {
     return textReply('当前没有待确认的操作。')
+  }
+
+  if (normalizedInput.includes('导入用户')) {
+    if (isTeacherMode()) return textReply('权限不足，教师不能导入用户数据。')
+    return csvActionReply(
+      '已进入用户导入流程。请选择包含 name、studentNo、role、phone、email 列的 CSV 文件。',
+      '导入用户',
+      '选择 CSV 文件',
+      'trigger_import_user'
+    )
+  }
+  if (normalizedInput.includes('导入课程')) {
+    return csvActionReply(
+      '已进入课程导入流程。请选择包含 name、startTime、signStart、signEnd、latitude、longitude、teacherName、location 列的 CSV 文件。',
+      '导入课程',
+      '选择 CSV 文件',
+      'trigger_import_course'
+    )
+  }
+  if (normalizedInput.includes('导出签到')) {
+    return csvActionReply(
+      '点击下方按钮导出签到记录 CSV。',
+      '导出签到',
+      '导出 CSV',
+      'trigger_export_checkin'
+    )
   }
 
   const intent = detectWriteIntent(text)
@@ -2807,6 +3319,59 @@ export function processMessage(raw: string, role: string, teacherName: string): 
   }
 
   return handleQuery(text)
+}
+
+function buildTimeSuggestions(op: PendingOperation): string[] {
+  if (op.timeSlots.hour.length > 0 && op.timeSlots.minute.length == 0) {
+    return ['整', '30分', '15分', '取消']
+  }
+  if ((op.timeSlots.month.length > 0 || op.timeSlots.day.length > 0) && op.timeSlots.hour.length == 0) {
+    return ['下午3点', '上午9点', '取消']
+  }
+  return ['明天下午3点', '下周三下午2点', '取消']
+}
+
+function buildSuggestions(reply: AgentReply): string[] {
+  if (reply.type == 'error' || reply.content == REFUSAL_MESSAGE) return []
+  if (sessionState == 'awaiting_confirm') return ['确认', '取消', '重新调整']
+  if (sessionState == 'awaiting_slots' && pendingOp != null) {
+    const op = pendingOp
+    if (op.intent == 'add_user') return ['张三', '学生 2024001', '老师 T002', '取消']
+    if (op.intent == 'add_course') {
+      if (op.timeValue.length == 0) return buildTimeSuggestions(op)
+      return ['赵老师', '取消']
+    }
+    if (op.intent == 'update_course') {
+      if (isCourseTimeField(op.fieldName)) {
+        const timeSuggestions = buildTimeSuggestions(op)
+        if (op.timeValue.length == 0 && op.timeSlots.hour.length == 0) timeSuggestions.push('推迟1小时')
+        return timeSuggestions
+      }
+      if (op.fieldName == 'teacher') return ['赵老师', '取消']
+      if (op.fieldName == 'location') return ['A栋101', 'A栋201', '取消']
+      if (op.fieldName == 'latitude') return ['34.2351', '取消']
+      if (op.fieldName == 'longitude') return ['108.9153', '取消']
+      return ['时间', '老师', '地点', '取消']
+    }
+    if (op.intent == 'update_user') return ['学号 2024003', '角色 老师', '手机 13800000000', '取消']
+    if (op.intent == 'delete_user') return ['张三', '李四', '取消']
+    if (op.intent == 'delete_course') return ['数据结构', '移动应用开发', '取消']
+    if (op.intent == 'delete_checkin') return ['张三', '取消']
+    return ['取消']
+  }
+  for (let i = 0; i < reply.data.actions.length; i++) {
+    const actionType = reply.data.actions[i].actionType
+    if (actionType != null && actionType.startsWith('trigger_')) {
+      return ['导入用户', '导入课程', '导出签到']
+    }
+  }
+  return ['查签到', '新增用户', '新增课程', '导出签到']
+}
+
+export function processMessage(raw: string, role: string, teacherName: string): AgentReply {
+  const reply = processMessageCore(raw, role, teacherName)
+  reply.suggestions = buildSuggestions(reply)
+  return reply
 }
 
 export function handleAgentInput(raw: string): AgentReply {

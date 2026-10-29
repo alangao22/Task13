@@ -2,6 +2,7 @@
   <view class="page">
     <!-- 顶部操作区 (两个按钮自动平分) -->
     <view class="top-bar">
+      <button class="top-btn export-btn" @click="exportData">导出数据</button>
       <button class="top-btn edit-btn" :class="{ 'active-mode': mode === 'edit' }" @click="toggleMode('edit')">修改结果</button>
       <button class="top-btn del-btn" :class="{ 'active-mode': mode === 'delete' }" @click="toggleMode('delete')">删除记录</button>
     </view>
@@ -31,6 +32,7 @@
 
 <script lang="ts">
 import { checkinTable } from '@/utils/checkinData.uts'
+import { exportCheckinsToCSV } from '@/utils/fileUtils.uts'
 
 export default {
   data() {
@@ -42,6 +44,10 @@ export default {
   methods: {
     toggleMode(m: string) {
       this.mode = this.mode === m ? 'normal' : m;
+    },
+    exportData() {
+      exportCheckinsToCSV(this.records)
+      uni.showToast({ title: '已导出 ' + this.records.length.toString() + ' 条', icon: 'none' })
     },
     onItemClick(record: any, index: number) {
       if (this.mode === 'edit') {
@@ -78,6 +84,7 @@ export default {
 .top-btn:last-child { margin-right: 0; }
 
 .edit-btn { background-color: #ff9500; }
+.export-btn { background-color: #34c759; }
 .del-btn { background-color: #ff3b30; }
 .active-mode { opacity: 0.6; border: 4rpx solid #333; }
 

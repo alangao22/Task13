@@ -18,6 +18,7 @@
         </view>
         <text class="c-info">开课：{{ course.startTime }}</text>
         <text class="c-info">可签：{{ course.signStart }} 至 {{ course.signEnd }}</text>
+        <text class="c-info" v-if="course.location">地点：{{ course.location }}</text>
         <text class="c-info">坐标：{{ course.latitude }}, {{ course.longitude }}</text>
       </view>
       <view v-if="myCourses.length === 0" class="empty">您还没有发布过课程</view>
@@ -29,6 +30,7 @@
         <view class="modal-title">{{ isEdit ? '修改课程' : '发布新课程' }}</view>
 
         <input class="modal-input" v-model="form.name" placeholder="课程名称" />
+        <input class="modal-input" v-model="form.location" placeholder="上课地点 (如 A栋101)" />
 
         <!-- 开课时间 -->
         <view class="time-label">开课时间</view>
@@ -98,6 +100,7 @@ export default {
       editIndex: -1,
       form: {
         name: '',
+        location: '',
         startDate: defaultDate, startHour: '08', startMin: '00',
         signStartDate: defaultDate, signStartHour: '07', signStartMin: '50',
         signEndDate: defaultDate, signEndHour: '08', signEndMin: '20',
@@ -123,6 +126,7 @@ export default {
       this.isEdit = false;
       this.form = {
         name: '',
+        location: '',
         startDate: defaultDate, startHour: '08', startMin: '00',
         signStartDate: defaultDate, signStartHour: '07', signStartMin: '50',
         signEndDate: defaultDate, signEndHour: '08', signEndMin: '20',
@@ -149,6 +153,7 @@ export default {
 
         this.form = {
           name: course.name,
+          location: course.location == null ? '' : course.location,
           startDate: start.date, startHour: start.hour, startMin: start.min,
           signStartDate: sStart.date, signStartHour: sStart.hour, signStartMin: sStart.min,
           signEndDate: sEnd.date, signEndHour: sEnd.hour, signEndMin: sEnd.min,
@@ -239,6 +244,7 @@ export default {
 
       const dataToSave = {
         name: this.form.name,
+        location: this.form.location,
         startTime: startTimeStr,
         signStart: signStartStr,
         signEnd: signEndStr,
