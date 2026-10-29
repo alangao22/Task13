@@ -13,7 +13,7 @@
             <text class="hero-spark">✨</text>
           </view>
           <text class="hero-title">你好，我是签到业务助理</text>
-          <text class="hero-desc">可以查询用户、课程与签到数据，也支持带确认的删除和时间修改。所有操作仅作用于签到业务数据。</text>
+          <text class="hero-desc">可以查询用户、课程与签到数据，也支持带二次确认的新增、修改与删除。所有操作仅作用于签到业务数据。</text>
           <view class="hero-tags">
             <text class="hero-tag">用户数据</text>
             <text class="hero-tag">课程数据</text>
@@ -125,7 +125,7 @@
         <input
           class="input"
           v-model="inputText"
-          placeholder="输入查询，如：查看所有签到"
+          placeholder="输入指令，如：新增用户张三"
           placeholder-class="input-ph"
           confirm-type="send"
           :adjust-position="true"
@@ -163,7 +163,7 @@ export default {
       seq: 0,
       alive: true,
       windowHeight: 0,
-      chips: ['查看所有签到', '查看课程列表', '查询所有用户']
+      chips: ['查询所有用户', '新增用户', '删除课程', '所有签到']
     }
   },
   computed: {

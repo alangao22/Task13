@@ -13,7 +13,7 @@
             <text class="hero-spark">✨</text>
           </view>
           <text class="hero-title">你好，{{ displayName }}</text>
-          <text class="hero-desc">我是教学助理，只展示你课程下的数据。可以查询课程、签到和学生，也可以直接对话修改开课时间。</text>
+          <text class="hero-desc">我是教学助理，只展示你课程下的数据。可以查询课程、签到和学生，也可以新增课程、修改开课时间。</text>
           <view class="hero-tags">
             <text class="hero-tag">我的课程</text>
             <text class="hero-tag">我的签到</text>
@@ -125,7 +125,7 @@
         <input
           class="input"
           v-model="inputText"
-          placeholder="输入查询，如：查询我的课程"
+          placeholder="输入指令，如：新增课程"
           placeholder-class="input-ph"
           confirm-type="send"
           :adjust-position="true"
@@ -164,7 +164,7 @@ export default {
       alive: true,
       windowHeight: 0,
       teacherName: '',
-      chips: ['查询我的课程', '查询最新签到', '查询我的学生']
+      chips: ['查询我的学生', '新增课程', '修改开课时间']
     }
   },
   computed: {
