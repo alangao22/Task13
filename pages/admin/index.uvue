@@ -6,7 +6,16 @@
     </view>
 
     <view class="menu-list">
-      <navigator class="menu-card" style="background-color: #1b2340; background-image: linear-gradient(135deg, #1b2340 0%, #263a78 55%, #4c2e8a 100%); border: 1rpx solid rgba(124, 140, 255, 0.35); box-shadow: 0 12rpx 32rpx rgba(76, 46, 138, 0.28); text-decoration: none;" hover-class="none" url="/pages/admin/agent"><text class="menu-icon">✨</text><view class="menu-info"><text class="menu-title" style="color: #ffffff;">AI 助手</text><text class="menu-desc" style="color: #c3ccff;">用对话查用户、课程与签到，支持快捷指令</text></view><text class="arrow" style="color: #aab8ff;">></text></navigator>
+      <!-- 完全使用和教师端一样的 class 结构 -->
+      <view class="menu-card ai-card" @click="goPage('agent')">
+        <text class="menu-icon">✨</text>
+        <view class="menu-info">
+          <text class="menu-title ai-title">AI 助手</text>
+          <text class="menu-desc ai-desc">用对话查用户、课程与签到，支持快捷指令</text>
+        </view>
+        <text class="arrow ai-arrow">></text>
+      </view>
+
       <view class="menu-card" @click="goPage('users')">
         <text class="menu-icon">👥</text>
         <view class="menu-info">
@@ -49,9 +58,15 @@ export default {
   },
   methods: {
     goPage(type: string) {
-      if (type === 'users') uni.navigateTo({ url: '/pages/admin/users' })
-      else if (type === 'courses') uni.navigateTo({ url: '/pages/admin/courses' })
-      else if (type === 'checkins') uni.navigateTo({ url: '/pages/admin/checkins' })
+      if (type === 'agent') {
+        uni.navigateTo({ url: '/pages/admin/agent' })
+      } else if (type === 'users') {
+        uni.navigateTo({ url: '/pages/admin/users' })
+      } else if (type === 'courses') {
+        uni.navigateTo({ url: '/pages/admin/courses' })
+      } else if (type === 'checkins') {
+        uni.navigateTo({ url: '/pages/admin/checkins' })
+      }
     },
     goBack() {
       uni.removeStorageSync('agent_history')
@@ -66,6 +81,7 @@ export default {
 .header { margin-bottom: 40rpx; padding-left: 10rpx; }
 .title { font-size: 44rpx; font-weight: bold; color: #333; display: block; }
 .subtitle { font-size: 28rpx; color: #888; margin-top: 10rpx; display: block; }
+
 .menu-list { display: flex; flex-direction: column; }
 .menu-card { background-color: #fff; border-radius: 20rpx; padding: 30rpx; display: flex; flex-direction: row; align-items: center; margin-bottom: 24rpx; }
 .menu-icon { font-size: 50rpx; margin-right: 20rpx; }
@@ -73,5 +89,12 @@ export default {
 .menu-title { font-size: 32rpx; font-weight: bold; color: #222; }
 .menu-desc { font-size: 24rpx; color: #999; margin-top: 6rpx; }
 .arrow { color: #ccc; font-size: 32rpx; }
+
+/* 这里就是和教师端一模一样的类名和颜色 */
+.ai-card { background-color: #eef4ff; border: 1rpx solid #cfe0ff; }
+.ai-title { color: #0057d9; }
+.ai-desc { color: #6b8fc9; }
+.ai-arrow { color: #7fa8e8; }
+
 .logout-btn { width: 100%; height: 90rpx; line-height: 90rpx; background-color: #fff; color: #e54d42; border-radius: 16rpx; font-size: 32rpx; margin-top: 40rpx; }
 </style>

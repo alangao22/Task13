@@ -1,3 +1,10 @@
-unpackage/ 
-node_modules/ 
-.hbuilderx/ 
+unpackage/
+node_modules/
+.hbuilderx/
+
+# 本地导入的角色数据，避免个人信息进入仓库
+data.csv
+
+# CSV 导出文件
+checkins.csv
+*.local.csv
