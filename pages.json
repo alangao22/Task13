@@ -36,13 +36,21 @@
       "path": "pages/admin/agent",
       "style": {
         "navigationBarTitleText": "AI 助手",
-        "navigationBarBackgroundColor": "#0b0e14",
-        "navigationBarTextStyle": "white"
+        "navigationBarBackgroundColor": "#ffffff",
+        "navigationBarTextStyle": "black"
       }
     },
     {
       "path": "pages/teacher/index",
       "style": { "navigationBarTitleText": "教师控制台" }
+    },
+    {
+      "path": "pages/teacher/agent",
+      "style": {
+        "navigationBarTitleText": "AI 助手",
+        "navigationBarBackgroundColor": "#ffffff",
+        "navigationBarTextStyle": "black"
+      }
     },
     {
       "path": "pages/teacher/courses",

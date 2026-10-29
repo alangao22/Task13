@@ -21,11 +21,18 @@ export type AgentCardItem = {
   badgeType: string
 }
 
+export type AgentCardAction = {
+  text: string
+  url?: string
+  actionType?: string
+}
+
 export type AgentCard = {
   title: string
   subtitle: string
   count: number
   items: AgentCardItem[]
+  actions: AgentCardAction[]
 }
 
 export type AgentReply = {
@@ -116,10 +123,31 @@ type PendingAction = {
 
 let pendingAction: PendingAction | null = null
 
+// 多轮会话状态机：idle | awaiting_minute | awaiting_confirm
+let sessionState: string = 'idle'
+let pendingCourseName: string = ''
+let pendingTime: string = ''
+
+// 当前会话角色：admin / teacher。教师模式会自动收窄查询与操作范围。
+let currentRole: string = 'admin'
+let currentTeacherName: string = ''
+
+// 时间解析辅助类型。
+type ParsedTime = {
+  hour: number
+  minute: number
+  hasMinute: boolean
+}
+
+type TimeChangeParts = {
+  coursePart: string
+  timePart: string
+}
+
 // ------------------------------ 基础工具 ------------------------------
 
 export function emptyCard(): AgentCard {
-  const card: AgentCard = { title: '', subtitle: '', count: 0, items: [] }
+  const card: AgentCard = { title: '', subtitle: '', count: 0, items: [], actions: [] }
   return card
 }
 
@@ -258,6 +286,41 @@ function findMentionedCourses(text: string): Course[] {
   return found
 }
 
+// ------------------------------ 教师权限范围 ------------------------------
+
+function isTeacherMode(): boolean {
+  return currentRole == 'teacher'
+}
+
+function isMyCourse(course: Course): boolean {
+  if (!isTeacherMode()) return true
+  const teacher = course.teacherName
+  return teacher != null && teacher == currentTeacherName
+}
+
+function myCourseIds(): number[] {
+  const ids: number[] = []
+  for (let i = 0; i < courses.length; i++) {
+    const teacher = courses[i].teacherName
+    if (teacher != null && teacher == currentTeacherName) {
+      ids.push(courses[i].id)
+    }
+  }
+  return ids
+}
+
+// 教师可见学生 = 自己课程下产生过签到记录的学生。
+function myStudentIds(): number[] {
+  const ids: number[] = []
+  const courseIds = myCourseIds()
+  for (let i = 0; i < checkinTable.length; i++) {
+    if (courseIds.includes(checkinTable[i].courseId) && !ids.includes(checkinTable[i].userId)) {
+      ids.push(checkinTable[i].userId)
+    }
+  }
+  return ids
+}
+
 function resolveRole(text: string): string {
   if (text.includes('管理员')) return 'admin'
   if (text.includes('老师') || text.includes('教师')) return 'teacher'
@@ -335,7 +398,8 @@ function buildUserCard(list: User[], label: string): AgentCard {
     title: '用户数据',
     subtitle: subtitle,
     count: items.length,
-    items: items
+    items: items,
+    actions: []
   }
   return card
 }
@@ -362,7 +426,8 @@ function buildCourseCard(list: Course[], label: string): AgentCard {
     title: '课程数据',
     subtitle: subtitle,
     count: items.length,
-    items: items
+    items: items,
+    actions: []
   }
   return card
 }
@@ -387,7 +452,8 @@ function buildCheckinCard(list: CheckinRecord[], label: string): AgentCard {
     title: '签到记录',
     subtitle: subtitle,
     count: items.length,
-    items: items
+    items: items,
+    actions: []
   }
   return card
 }
@@ -453,9 +519,14 @@ function statsCheckinsReply(list: CheckinRecord[]): AgentReply {
 function queryUsers(text: string, keyword: string, stats: boolean): AgentReply {
   const mentioned = findMentionedUsers(text)
   const role = resolveRole(text)
+  let allowedStudentIds: number[] = []
+  if (isTeacherMode()) allowedStudentIds = myStudentIds()
   let list: User[] = []
   for (let i = 0; i < users.length; i++) {
     const user = users[i]
+    if (isTeacherMode() && !allowedStudentIds.includes(user.id)) {
+      continue
+    }
     let keep = true
     if (mentioned.length > 0) {
       keep = false
@@ -480,6 +551,15 @@ function queryUsers(text: string, keyword: string, stats: boolean): AgentReply {
   if (mentioned.length > 0) label = userLabel(mentioned)
   else if (role.length > 0) label = roleText(role)
   const card = buildUserCard(list, label)
+  if (!isTeacherMode()) {
+    const userActions: AgentCardAction[] = []
+    const adminAction: AgentCardAction = {
+      text: '前往用户管理',
+      url: '/pages/admin/users'
+    }
+    userActions.push(adminAction)
+    card.actions = userActions
+  }
   if (list.length == 0) {
     if (label.length > 0) return cardReply('没有找到与「' + label + '」匹配的用户。', card)
     return cardReply('当前用户表中暂无数据。', card)
@@ -493,6 +573,7 @@ function queryCourses(text: string, keyword: string, stats: boolean): AgentReply
   let list: Course[] = []
   for (let i = 0; i < courses.length; i++) {
     const course = courses[i]
+    if (!isMyCourse(course)) continue
     let keep = true
     if (mentioned.length > 0) {
       keep = false
@@ -523,6 +604,21 @@ function queryCourses(text: string, keyword: string, stats: boolean): AgentReply
   if (mentioned.length > 0) label = courseLabel(mentioned)
   else if (mentionedUsers.length > 0) label = userLabel(mentionedUsers) + ' 的课程'
   const card = buildCourseCard(list, label)
+  const courseActions: AgentCardAction[] = []
+  if (currentRole == 'teacher') {
+    const teacherAction: AgentCardAction = {
+      text: '前往课程管理',
+      url: '/pages/teacher/courses?teacherName=' + encodeURIComponent(currentTeacherName)
+    }
+    courseActions.push(teacherAction)
+  } else {
+    const adminAction: AgentCardAction = {
+      text: '前往课程管理',
+      url: '/pages/admin/courses'
+    }
+    courseActions.push(adminAction)
+  }
+  card.actions = courseActions
   if (list.length == 0) {
     if (label.length > 0) return cardReply('没有找到与「' + label + '」匹配的课程。', card)
     return cardReply('当前课程表中暂无数据。', card)
@@ -536,10 +632,13 @@ function queryCheckins(text: string, keyword: string, stats: boolean): AgentRepl
   const result = resolveResult(text)
   const date = resolveDate(text)
   const latest = hasWord(text, LATEST_WORDS)
+  let allowedCourseIds: number[] = []
+  if (isTeacherMode()) allowedCourseIds = myCourseIds()
   let list: CheckinRecord[] = []
 
   for (let i = 0; i < checkinTable.length; i++) {
     const record = checkinTable[i]
+    if (isTeacherMode() && !allowedCourseIds.includes(record.courseId)) continue
     let keep = true
     if (mentionedUsers.length > 0) {
       keep = false
@@ -589,6 +688,21 @@ function queryCheckins(text: string, keyword: string, stats: boolean): AgentRepl
   let shown = list
   if (list.length > limit) shown = list.slice(0, limit)
   const card = buildCheckinCard(shown, label)
+  const actions: AgentCardAction[] = []
+  if (currentRole == 'teacher') {
+    const teacherAction: AgentCardAction = {
+      text: '前往签到管理',
+      url: '/pages/teacher/checkins?teacherName=' + encodeURIComponent(currentTeacherName)
+    }
+    actions.push(teacherAction)
+  } else {
+    const adminAction: AgentCardAction = {
+      text: '前往签到管理',
+      url: '/pages/admin/checkins'
+    }
+    actions.push(adminAction)
+  }
+  card.actions = actions
   if (list.length == 0) {
     if (label.length > 0) return cardReply('没有找到与「' + label + '」匹配的签到记录。', card)
     return cardReply('当前暂无签到记录。', card)
@@ -623,9 +737,239 @@ function handleQuery(text: string): AgentReply {
   return errorReply(REFUSAL_MESSAGE)
 }
 
+// ------------------------------ 多轮时间修改状态机 ------------------------------
+
+function toInt(value: string): number {
+  let result = 0
+  for (let i = 0; i < value.length; i++) {
+    const digit = value.charCodeAt(i) - 48
+    if (digit < 0 || digit > 9) return -1
+    result = result * 10 + digit
+  }
+  return result
+}
+
+// 支持 "15:30" / "15点30分" / "15点" / "15"。
+function parseTimeSpec(spec: string): ParsedTime | null {
+  const withMinute = new RegExp('(\\d{1,2})\\s*(?:点|时|:|：)\\s*(\\d{1,2})').exec(spec)
+  if (withMinute != null) {
+    const hour = toInt(withMinute[1])
+    const minute = toInt(withMinute[2])
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null
+    const result: ParsedTime = { hour: hour, minute: minute, hasMinute: true }
+    return result
+  }
+  const hourOnly = new RegExp('(\\d{1,2})\\s*(?:点|时|:|：)').exec(spec)
+  if (hourOnly != null) {
+    const hour = toInt(hourOnly[1])
+    if (hour < 0 || hour > 23) return null
+    const result: ParsedTime = { hour: hour, minute: 0, hasMinute: false }
+    return result
+  }
+  const bare = new RegExp('(\\d{1,2})').exec(spec)
+  if (bare != null) {
+    const hour = toInt(bare[1])
+    if (hour < 0 || hour > 23) return null
+    const result: ParsedTime = { hour: hour, minute: 0, hasMinute: false }
+    return result
+  }
+  return null
+}
+
+function parseMinute(text: string): number {
+  const matched = new RegExp('(\\d{1,2})').exec(text)
+  if (matched == null) return -1
+  const value = toInt(matched[1])
+  if (value < 0 || value > 59) return -1
+  return value
+}
+
+function cleanCoursePart(text: string): string {
+  let result = text
+  const words: string[] = [
+    '开课时间', '时间', '把', '将', '请', '帮我', '一下',
+    '课程', '的', '修改', '调整', '设置', '改为', '改成'
+  ]
+  for (let i = 0; i < words.length; i++) {
+    result = removeToken(result, words[i])
+  }
+  return result.trim()
+}
+
+function splitTimeChange(text: string): TimeChangeParts | null {
+  const markers: string[] = [
+    '开课时间改为', '开课时间改成', '时间改为', '时间改成',
+    '修改为', '修改成', '调整为', '调整成', '设置为', '设成',
+    '改为', '改成', '时间为'
+  ]
+  for (let i = 0; i < markers.length; i++) {
+    const index = text.indexOf(markers[i])
+    if (index >= 0) {
+      const parts: TimeChangeParts = {
+        coursePart: text.substring(0, index),
+        timePart: text.substring(index + markers[i].length)
+      }
+      return parts
+    }
+  }
+  return null
+}
+
+function buildFullTime(course: Course, hour: number, minute: number): string {
+  const start = course.startTime
+  let datePart = datePrefix(0)
+  if (start.length >= 10) datePart = start.substring(0, 10)
+  return datePart + ' ' + pad2(hour) + ':' + pad2(minute)
+}
+
+function findCourseForUpdate(name: string): Course | null {
+  for (let i = 0; i < courses.length; i++) {
+    const course = courses[i]
+    if (course.name == name && course.id != 0 && isMyCourse(course)) return course
+  }
+  return null
+}
+
+function resetSessionState(): void {
+  sessionState = 'idle'
+  pendingCourseName = ''
+  pendingTime = ''
+}
+
+function buildTimeConfirmReply(course: Course, fullTime: string): AgentReply {
+  const hhmm = fullTime.substring(fullTime.length - 5)
+  const items: AgentCardItem[] = []
+  const courseItem: AgentCardItem = {
+    title: course.name,
+    subtitle: '课程',
+    badge: '待修改',
+    badgeType: 'warn'
+  }
+  items.push(courseItem)
+  const timeItem: AgentCardItem = {
+    title: hhmm,
+    subtitle: fullTime,
+    badge: '新时间',
+    badgeType: 'info'
+  }
+  items.push(timeItem)
+  const actions: AgentCardAction[] = []
+  const confirmAction: AgentCardAction = {
+    text: '确认修改',
+    actionType: 'confirm_update'
+  }
+  actions.push(confirmAction)
+  const cancelAction: AgentCardAction = {
+    text: '取消',
+    actionType: 'cancel_action'
+  }
+  actions.push(cancelAction)
+  const card: AgentCard = {
+    title: '修改上课时间确认',
+    subtitle: '点击按钮或回复「确认修改」',
+    count: items.length,
+    items: items,
+    actions: actions
+  }
+  return cardReply('即将把【' + course.name + '】的上课时间修改为【' + hhmm + '】，请确认。', card)
+}
+
+function executeTimeUpdate(): AgentReply {
+  const courseName = pendingCourseName
+  const newTime = pendingTime
+  resetSessionState()
+  if (courseName.length == 0 || newTime.length == 0) {
+    return textReply('当前没有待确认的时间修改。')
+  }
+  const course = findCourseForUpdate(courseName)
+  if (course == null) {
+    return textReply('课程已不存在或你没有修改权限，操作已取消。')
+  }
+  const oldTime = course.startTime
+  course.startTime = newTime
+  return textReply('修改成功：课程「' + course.name + '」的开课时间已从 ' + oldTime + ' 更新为 ' + newTime + '。')
+}
+
+function handleTimeChange(text: string): AgentReply | null {
+  const parts = splitTimeChange(text)
+  if (parts == null) return null
+  if (!new RegExp('\\d').test(parts.timePart)) return null
+
+  let candidates: Course[] = []
+  const mentioned = findMentionedCourses(text)
+  for (let i = 0; i < mentioned.length; i++) {
+    const course = mentioned[i]
+    if (course.id != 0 && isMyCourse(course)) candidates.push(course)
+  }
+
+  if (candidates.length == 0) {
+    const namePart = cleanCoursePart(parts.coursePart).toLowerCase()
+    if (namePart.length > 0) {
+      for (let i = 0; i < courses.length; i++) {
+        const course = courses[i]
+        if (course.id == 0 || !isMyCourse(course)) continue
+        if (course.name.toLowerCase().includes(namePart)) candidates.push(course)
+      }
+    }
+  }
+
+  if (candidates.length == 0) {
+    return textReply('没有找到可修改的课程。请使用完整课程名，例如「把数据结构改为 15:30」。教师只能修改自己的课程。')
+  }
+  if (candidates.length > 1) {
+    return textReply('找到多门匹配课程：' + courseLabel(candidates) + '。请使用完整课程名重试。')
+  }
+
+  const course = candidates[0]
+  const parsed = parseTimeSpec(parts.timePart)
+  if (parsed == null) {
+    return textReply('时间格式不正确，请使用 0-23 点、0-59 分，例如「15:30」或「15点30分」。')
+  }
+
+  pendingAction = null
+  pendingCourseName = course.name
+
+  if (!parsed.hasMinute) {
+    sessionState = 'awaiting_minute'
+    pendingTime = parsed.hour.toString()
+    return textReply('请问「' + course.name + '」的分钟数设置为多少？例如回复 30；回复「取消」可退出。')
+  }
+
+  const fullTime = buildFullTime(course, parsed.hour, parsed.minute)
+  pendingTime = fullTime
+  sessionState = 'awaiting_confirm'
+  return buildTimeConfirmReply(course, fullTime)
+}
+
 // ------------------------------ 删除意图（二次确认） ------------------------------
 
+function buildDeleteConfirmReply(content: string, items: AgentCardItem[]): AgentReply {
+  const actions: AgentCardAction[] = []
+  const confirmAction: AgentCardAction = {
+    text: '确认删除',
+    actionType: 'confirm_delete'
+  }
+  actions.push(confirmAction)
+  const cancelAction: AgentCardAction = {
+    text: '取消',
+    actionType: 'cancel_action'
+  }
+  actions.push(cancelAction)
+  const card: AgentCard = {
+    title: '删除确认',
+    subtitle: '确认后立即写入数据表',
+    count: items.length,
+    items: items,
+    actions: actions
+  }
+  return cardReply(content, card)
+}
+
 function prepareDeleteUser(text: string): AgentReply {
+  if (isTeacherMode()) {
+    pendingAction = null
+    return textReply('教师端不支持删除用户，请联系管理员操作。')
+  }
   const keyword = extractDeleteKeyword(text)
   const mentioned = findMentionedUsers(text)
   let targets: User[] = []
@@ -663,8 +1007,15 @@ function prepareDeleteUser(text: string): AgentReply {
     label: target.name + ' / ' + target.studentNo
   }
   pendingAction = action
-  return textReply('即将删除用户「' + target.name + '」（学号 ' + target.studentNo + '）。\n'
-    + '删除后不可恢复，回复「确认」执行，回复「取消」放弃。')
+  const items: AgentCardItem[] = []
+  const item: AgentCardItem = {
+    title: target.name,
+    subtitle: '学号 ' + target.studentNo,
+    badge: roleText(target.role),
+    badgeType: roleBadgeType(target.role)
+  }
+  items.push(item)
+  return buildDeleteConfirmReply('即将删除【' + target.name + '】用户，请确认。', items)
 }
 
 function prepareDeleteCourse(text: string): AgentReply {
@@ -673,10 +1024,13 @@ function prepareDeleteCourse(text: string): AgentReply {
   const mentionedUsers = findMentionedUsers(text)
   let targets: Course[] = []
   if (mentioned.length > 0) {
-    for (let i = 0; i < mentioned.length; i++) targets.push(mentioned[i])
+    for (let i = 0; i < mentioned.length; i++) {
+      if (isMyCourse(mentioned[i])) targets.push(mentioned[i])
+    }
   } else {
     for (let i = 0; i < courses.length; i++) {
       const course = courses[i]
+      if (!isMyCourse(course)) continue
       let hit = false
       if (keyword.length > 0 && course.name.toLowerCase().includes(keyword)) hit = true
       const teacherName = course.teacherName
@@ -694,6 +1048,7 @@ function prepareDeleteCourse(text: string): AgentReply {
   if (targets.length == 0) {
     pendingAction = null
     if (keyword.length == 0) return textReply('请告诉我要删除哪门课程，例如「删除课程数据结构」。')
+    if (isTeacherMode()) return textReply('没有找到你有权限删除的课程。教师只能删除自己发布的课程。')
     return textReply('没有找到与「' + keyword + '」匹配的课程。')
   }
   if (targets.length > 1) {
@@ -714,8 +1069,17 @@ function prepareDeleteCourse(text: string): AgentReply {
     label: target.name
   }
   pendingAction = action
-  return textReply('即将删除课程「' + target.name + '」。\n'
-    + '该课程的历史签到记录不会被联动删除。回复「确认」执行，回复「取消」放弃。')
+  const teacherName = target.teacherName
+  const teacher = teacherName == null ? '未指定教师' : teacherName
+  const items: AgentCardItem[] = []
+  const item: AgentCardItem = {
+    title: target.name,
+    subtitle: teacher + ' · ' + target.startTime,
+    badge: '待删除',
+    badgeType: 'danger'
+  }
+  items.push(item)
+  return buildDeleteConfirmReply('即将删除【' + target.name + '】课程，请确认。', items)
 }
 
 function prepareDeleteCheckin(text: string): AgentReply {
@@ -732,9 +1096,12 @@ function prepareDeleteCheckin(text: string): AgentReply {
     return textReply('请指定要删除的签到记录，例如「删除张三的签到」。为避免误删，不支持一键清空。')
   }
 
+  let allowedCourseIds: number[] = []
+  if (isTeacherMode()) allowedCourseIds = myCourseIds()
   let targets: CheckinRecord[] = []
   for (let i = 0; i < checkinTable.length; i++) {
     const record = checkinTable[i]
+    if (isTeacherMode() && !allowedCourseIds.includes(record.courseId)) continue
     let keep = true
     if (mentionedUsers.length > 0) {
       keep = false
@@ -760,16 +1127,22 @@ function prepareDeleteCheckin(text: string): AgentReply {
 
   if (targets.length == 0) {
     pendingAction = null
+    if (isTeacherMode()) return textReply('没有找到你有权限删除的签到记录。')
     return textReply('没有找到匹配的签到记录，未执行删除。')
   }
 
   const ids: number[] = []
-  let detail = ''
+  const items: AgentCardItem[] = []
   for (let i = 0; i < targets.length; i++) {
     ids.push(targets[i].id)
-    if (i < 3) {
-      if (detail.length > 0) detail += '\n'
-      detail += '· ' + targets[i].userName + ' · ' + targets[i].courseName + ' · ' + targets[i].checkinTime
+    if (i < 10) {
+      const item: AgentCardItem = {
+        title: targets[i].userName + ' · ' + targets[i].courseName,
+        subtitle: targets[i].checkinTime,
+        badge: '待删除',
+        badgeType: 'danger'
+      }
+      items.push(item)
     }
   }
   let label = ''
@@ -783,8 +1156,13 @@ function prepareDeleteCheckin(text: string): AgentReply {
   }
   pendingAction = action
 
-  return textReply('即将删除 ' + targets.length.toString() + ' 条签到记录：\n' + detail
-    + '\n删除后不可恢复，回复「确认」执行，回复「取消」放弃。')
+  if (targets.length == 1) {
+    return buildDeleteConfirmReply(
+      '即将删除【' + targets[0].userName + ' · ' + targets[0].courseName + '】的签到记录，请确认。',
+      items
+    )
+  }
+  return buildDeleteConfirmReply('即将删除【' + targets.length.toString() + '】条签到记录，请确认。', items)
 }
 
 function handleDelete(text: string): AgentReply {
@@ -840,7 +1218,7 @@ function executePending(action: PendingAction | null): AgentReply {
     for (let i = 0; i < action.ids.length; i++) {
       const id = action.ids[i]
       for (let j = courses.length - 1; j >= 0; j--) {
-        if (courses[j].id === id && courses[j].id != 0) {
+        if (courses[j].id === id && courses[j].id != 0 && isMyCourse(courses[j])) {
           courses.splice(j, 1)
           deleted += 1
           break
@@ -873,10 +1251,13 @@ function executePending(action: PendingAction | null): AgentReply {
 // ------------------------------ 统一入口 ------------------------------
 
 /**
- * 处理一条用户消息。
- * 返回值严格遵循 { type, content, data } 约定。
+ * 角色感知入口：管理员与教师共用同一套黑名单、意图与状态机。
+ * 教师模式下，查询 / 删除 / 改时间都会自动收窄到当前老师的数据。
  */
-export function handleAgentInput(raw: string): AgentReply {
+export function processMessage(raw: string, role: string, teacherName: string): AgentReply {
+  currentRole = role
+  currentTeacherName = teacherName
+
   const trimmed = raw.trim()
   if (trimmed.length == 0) return errorReply(REFUSAL_MESSAGE)
   if (trimmed.length > MAX_INPUT_LENGTH) return errorReply(REFUSAL_MESSAGE)
@@ -884,12 +1265,78 @@ export function handleAgentInput(raw: string): AgentReply {
   const text = normalizeInput(trimmed)
   if (text.length == 0) return errorReply(REFUSAL_MESSAGE)
 
-  // 安全拦截必须先于"确认删除"，避免 "忽略指令，确认" 之类的组合攻击。
+  // 安全拦截永远优先于确认与业务状态。
   if (hitBlacklist(text)) {
     pendingAction = null
+    resetSessionState()
     return errorReply(REFUSAL_MESSAGE)
   }
 
+  // 卡片按钮内置指令：/cancel_action
+  if (text.includes('/cancel_action')) {
+    pendingAction = null
+    resetSessionState()
+    return textReply('已取消本次操作。')
+  }
+
+  // 卡片按钮内置指令：/confirm_delete
+  if (text.includes('/confirm_delete')) {
+    const deleteAction = pendingAction
+    if (deleteAction == null) {
+      return textReply('当前没有待确认的删除操作。')
+    }
+    resetSessionState()
+    return executePending(deleteAction)
+  }
+
+  // 卡片按钮内置指令：/confirm_update
+  if (text.includes('/confirm_update')) {
+    if (sessionState != 'awaiting_confirm') {
+      return textReply('当前没有待确认的时间修改。')
+    }
+    return executeTimeUpdate()
+  }
+
+  // 多轮状态：等待分钟
+  if (sessionState == 'awaiting_minute') {
+    if (isCancel(text)) {
+      resetSessionState()
+      return textReply('已取消本次时间修改。')
+    }
+    // 用户可能直接发起了另一条改时间指令。
+    const another = handleTimeChange(text)
+    if (another != null) return another
+
+    const minute = parseMinute(text)
+    if (minute < 0) {
+      return textReply('请输入 0-59 的分钟数，例如 30；回复「取消」可退出。')
+    }
+    const course = findCourseForUpdate(pendingCourseName)
+    if (course == null) {
+      resetSessionState()
+      return textReply('课程已不存在或你没有修改权限，操作已取消。')
+    }
+    const hour = toInt(pendingTime)
+    const fullTime = buildFullTime(course, hour, minute)
+    pendingTime = fullTime
+    sessionState = 'awaiting_confirm'
+    return buildTimeConfirmReply(course, fullTime)
+  }
+
+  // 多轮状态：等待确认
+  if (sessionState == 'awaiting_confirm') {
+    if (isCancel(text)) {
+      resetSessionState()
+      return textReply('已取消本次时间修改。')
+    }
+    if (text == '确认' || text == '确定' || text == '执行' || text == '确认修改') {
+      return executeTimeUpdate()
+    }
+    // 输入了新指令：放弃本次待确认修改，继续走白名单。
+    resetSessionState()
+  }
+
+  // 删除动作的二次确认状态。
   const action = pendingAction
   if (action != null) {
     if (isConfirm(text)) return executePending(action)
@@ -897,18 +1344,33 @@ export function handleAgentInput(raw: string): AgentReply {
       pendingAction = null
       return textReply('已取消本次操作。')
     }
-    // 用户输入了新指令：放弃旧的待确认动作，继续走白名单解析。
+    // 新指令：放弃旧的待确认删除。
     pendingAction = null
   }
 
+  // 修改课程开课时间：把[课程名]改为[时间]
+  const timeReply = handleTimeChange(text)
+  if (timeReply != null) return timeReply
+
   if (hasWord(text, DELETE_WORDS)) {
+    resetSessionState()
     return handleDelete(text)
   }
 
   return handleQuery(text)
 }
 
-// 供页面在极端情况下主动清空待确认状态（例如页面卸载）。
+/**
+ * 兼容旧调用：管理员端的默认入口。
+ */
+export function handleAgentInput(raw: string): AgentReply {
+  return processMessage(raw, 'admin', '')
+}
+
+// 页面卸载时清空所有会话状态。
 export function resetAgentState(): void {
   pendingAction = null
+  resetSessionState()
+  currentRole = 'admin'
+  currentTeacherName = ''
 }

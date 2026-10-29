@@ -8,13 +8,12 @@
       :scroll-into-view="scrollInto"
     >
       <view class="chat-inner">
-        <!-- 空会话欢迎区 -->
         <view v-if="messages.length === 0 && !sending" class="hero">
           <view class="hero-badge">
             <text class="hero-spark">✨</text>
           </view>
           <text class="hero-title">你好，我是签到业务助理</text>
-          <text class="hero-desc">可以帮你查询用户、课程与签到数据，也支持按姓名删除记录。我只处理这三类业务，不执行任何系统或代码指令。</text>
+          <text class="hero-desc">可以查询用户、课程与签到数据，也支持带确认的删除和时间修改。所有操作仅作用于签到业务数据。</text>
           <view class="hero-tags">
             <text class="hero-tag">用户数据</text>
             <text class="hero-tag">课程数据</text>
@@ -22,7 +21,6 @@
           </view>
         </view>
 
-        <!-- 消息列表 -->
         <view
           class="msg-row"
           v-for="msg in messages"
@@ -35,10 +33,7 @@
           </view>
 
           <view class="msg-body" :class="msg.role === 'user' ? 'msg-body-right' : ''">
-            <view
-              v-if="msg.role === 'user'"
-              class="bubble bubble-user"
-            >
+            <view v-if="msg.role === 'user'" class="bubble bubble-user">
               <text class="bubble-text bubble-text-user">{{ msg.content }}</text>
             </view>
 
@@ -50,7 +45,6 @@
               <text v-if="isRefusal(msg.content)" class="refusal-tag">⚠ 安全提示</text>
               <text class="bubble-text">{{ msg.content }}</text>
 
-              <!-- 结构化数据卡片 -->
               <view v-if="msg.type === 'card'" class="card">
                 <view class="card-head">
                   <view class="card-head-left">
@@ -63,7 +57,7 @@
                 </view>
 
                 <view v-if="msg.data.items.length > 0" class="card-list">
-                  <view class="card-item" v-for="(item, idx) in msg.data.items" :key="idx">
+                  <view class="card-item" v-for="(item, idx) in visibleItems(msg.data.items)" :key="idx">
                     <view class="item-main">
                       <text class="item-title">{{ item.title }}</text>
                       <text class="item-sub">{{ item.subtitle }}</text>
@@ -75,12 +69,24 @@
                 <view v-else class="card-empty">
                   <text class="card-empty-text">暂无匹配数据</text>
                 </view>
+
+                <text v-if="msg.data.items.length > 10" class="card-more">仅展示前 10 条，点击下方按钮查看全部</text>
+
+                <view v-if="msg.data.actions.length > 0" class="card-actions">
+                  <view
+                    class="card-action"
+                    v-for="(action, actionIndex) in msg.data.actions"
+                    :key="actionIndex"
+                    @click="onCardAction(action)"
+                  >
+                    <text class="card-action-text">{{ action.text }}</text>
+                  </view>
+                </view>
               </view>
             </view>
           </view>
         </view>
 
-        <!-- 思考中 -->
         <view v-if="sending" class="msg-row row-left">
           <view class="avatar">
             <text class="avatar-text">AI</text>
@@ -97,7 +103,6 @@
       </view>
     </scroll-view>
 
-    <!-- 底部输入区 -->
     <view class="composer">
       <scroll-view
         class="chips"
@@ -120,7 +125,7 @@
         <input
           class="input"
           v-model="inputText"
-          placeholder="输入查询，例如：查询所有用户"
+          placeholder="输入查询，如：查看所有签到"
           placeholder-class="input-ph"
           confirm-type="send"
           :adjust-position="true"
@@ -138,11 +143,13 @@
 
 <script lang="ts">
 import {
-  handleAgentInput,
+  processMessage,
   resetAgentState,
   emptyCard,
   REFUSAL_MESSAGE,
   type AgentCard,
+  type AgentCardAction,
+  type AgentCardItem,
   type ChatMessage
 } from '@/utils/agentEngine.uts'
 
@@ -156,7 +163,7 @@ export default {
       seq: 0,
       alive: true,
       windowHeight: 0,
-      chips: ['查询所有用户', '查询最新签到', '所有课程']
+      chips: ['查看所有签到', '查看课程列表', '查询所有用户']
     }
   },
   computed: {
@@ -189,7 +196,7 @@ export default {
 
       setTimeout(() => {
         if (!this.alive) return
-        const reply = handleAgentInput(text)
+        const reply = processMessage(text, 'admin', '')
         this.sending = false
         if (reply.type == 'card') {
           this.appendMessage('agent', 'card', reply.content, reply.data)
@@ -225,6 +232,29 @@ export default {
     },
     isRefusal(content: string): boolean {
       return content == REFUSAL_MESSAGE
+    },
+    visibleItems(items: AgentCardItem[]): AgentCardItem[] {
+      return items.slice(0, 10)
+    },
+    onCardAction(action: AgentCardAction) {
+      if (this.sending) return
+      const url = action.url
+      if (url != null && url.length > 0) {
+        uni.navigateTo({ url: url })
+        return
+      }
+      const actionType = action.actionType
+      if (actionType == null || actionType.length == 0) return
+
+      this.appendMessage('user', 'text', action.text, null)
+      let command = '/' + actionType
+      if (actionType.startsWith('/')) command = actionType
+      const reply = processMessage(command, 'admin', '')
+      if (reply.type == 'card') {
+        this.appendMessage('agent', 'card', reply.content, reply.data)
+      } else {
+        this.appendMessage('agent', 'text', reply.content, reply.data)
+      }
     }
   }
 }
@@ -235,8 +265,7 @@ export default {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background-color: #0b0e14;
-  background-image: linear-gradient(180deg, #0b0e14 0%, #0d1322 55%, #0b0e14 100%);
+  background-color: #f5f6fa;
 }
 
 .chat-scroll {
@@ -254,19 +283,19 @@ export default {
 .hero {
   display: flex;
   flex-direction: column;
-  background-color: #11151f;
-  border: 1rpx solid #222a3c;
-  border-radius: 28rpx;
-  padding: 34rpx 30rpx;
-  margin-bottom: 34rpx;
+  background-color: #ffffff;
+  border: 1rpx solid #eef0f5;
+  border-radius: 24rpx;
+  padding: 32rpx 30rpx;
+  margin-bottom: 30rpx;
+  box-shadow: 0 8rpx 24rpx rgba(0, 0, 0, 0.06);
 }
 
 .hero-badge {
   width: 76rpx;
   height: 76rpx;
-  border-radius: 24rpx;
-  background-color: #4f46e5;
-  background-image: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+  border-radius: 22rpx;
+  background-color: #eaf3ff;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -279,13 +308,13 @@ export default {
 .hero-title {
   font-size: 32rpx;
   font-weight: bold;
-  color: #f2f5ff;
+  color: #222222;
   margin-top: 22rpx;
 }
 
 .hero-desc {
   font-size: 24rpx;
-  color: #8b93a8;
+  color: #888888;
   line-height: 1.65;
   margin-top: 12rpx;
 }
@@ -293,14 +322,14 @@ export default {
 .hero-tags {
   display: flex;
   flex-direction: row;
-  margin-top: 22rpx;
+  margin-top: 20rpx;
 }
 
 .hero-tag {
   font-size: 20rpx;
-  color: #9fb0ff;
-  background-color: rgba(99, 102, 241, 0.14);
-  border: 1rpx solid rgba(99, 102, 241, 0.3);
+  color: #666666;
+  background-color: #f2f4f8;
+  border: 1rpx solid #e8ebf0;
   border-radius: 20rpx;
   padding: 6rpx 16rpx;
   margin-right: 12rpx;
@@ -311,7 +340,7 @@ export default {
   display: flex;
   flex-direction: row;
   align-items: flex-start;
-  margin-bottom: 28rpx;
+  margin-bottom: 26rpx;
 }
 
 .row-left {
@@ -326,8 +355,8 @@ export default {
   width: 56rpx;
   height: 56rpx;
   border-radius: 18rpx;
-  background-color: #4f46e5;
-  background-image: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+  background-color: #eaf3ff;
+  border: 1rpx solid #d6e6ff;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -338,7 +367,7 @@ export default {
 .avatar-text {
   font-size: 20rpx;
   font-weight: bold;
-  color: #ffffff;
+  color: #007aff;
 }
 
 .msg-body {
@@ -355,32 +384,32 @@ export default {
 .bubble {
   max-width: 100%;
   padding: 22rpx 26rpx;
-  border-radius: 26rpx;
+  border-radius: 20rpx;
   display: flex;
   flex-direction: column;
 }
 
 .bubble-user {
-  background-color: #2563eb;
-  background-image: linear-gradient(135deg, #2563eb 0%, #4f46e5 100%);
-  border-top-right-radius: 8rpx;
+  background-color: #007aff;
+  border-top-right-radius: 6rpx;
 }
 
 .bubble-agent {
-  background-color: #171b26;
-  border: 1rpx solid #232a3b;
-  border-top-left-radius: 8rpx;
+  background-color: #ffffff;
+  border: 1rpx solid #eef0f5;
+  border-top-left-radius: 6rpx;
+  box-shadow: 0 4rpx 16rpx rgba(0, 0, 0, 0.06);
 }
 
 .bubble-refusal {
-  background-color: #1b1a15;
-  border-color: #6b531f;
+  background-color: #fff8e6;
+  border-color: #f0d48a;
 }
 
 .bubble-text {
   font-size: 28rpx;
   line-height: 1.65;
-  color: #e8ecf5;
+  color: #333333;
   white-space: pre-wrap;
 }
 
@@ -390,27 +419,28 @@ export default {
 
 .refusal-tag {
   font-size: 20rpx;
-  color: #fbbf24;
+  color: #b8860b;
   margin-bottom: 8rpx;
 }
 
 /* ---------------- 卡片 ---------------- */
 .card {
-  margin-top: 20rpx;
-  background-color: #0f131c;
-  border: 1rpx solid #232c40;
+  margin-top: 18rpx;
+  background-color: #ffffff;
+  border: 1rpx solid #eef0f5;
   border-radius: 20rpx;
   overflow: hidden;
+  box-shadow: 0 8rpx 24rpx rgba(0, 0, 0, 0.1);
 }
 
 .card-head {
-  background-color: #141a29;
-  background-image: linear-gradient(135deg, rgba(59, 130, 246, 0.16) 0%, rgba(139, 92, 246, 0.1) 100%);
+  background-color: #f8faff;
   padding: 20rpx 22rpx;
   display: flex;
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
+  border-bottom: 1rpx solid #eef0f5;
 }
 
 .card-head-left {
@@ -422,19 +452,19 @@ export default {
 .card-title {
   font-size: 26rpx;
   font-weight: bold;
-  color: #eef2ff;
+  color: #222222;
 }
 
 .card-sub {
   font-size: 20rpx;
-  color: #8f9ab8;
+  color: #999999;
   margin-top: 6rpx;
 }
 
 .card-count {
   height: 44rpx;
   border-radius: 22rpx;
-  background-color: rgba(99, 102, 241, 0.22);
+  background-color: #eaf3ff;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -445,7 +475,7 @@ export default {
 
 .card-count-text {
   font-size: 22rpx;
-  color: #aab8ff;
+  color: #007aff;
   font-weight: bold;
 }
 
@@ -454,7 +484,7 @@ export default {
   flex-direction: row;
   align-items: flex-start;
   padding: 20rpx 22rpx;
-  border-top: 1rpx solid #1c2333;
+  border-top: 1rpx solid #f0f2f7;
 }
 
 .item-main {
@@ -465,12 +495,12 @@ export default {
 
 .item-title {
   font-size: 26rpx;
-  color: #e6eaf4;
+  color: #333333;
 }
 
 .item-sub {
   font-size: 21rpx;
-  color: #7f89a2;
+  color: #999999;
   line-height: 1.5;
   margin-top: 6rpx;
 }
@@ -484,28 +514,28 @@ export default {
 }
 
 .badge-info {
-  color: #7fb0ff;
-  background-color: rgba(59, 130, 246, 0.16);
+  color: #007aff;
+  background-color: #eaf3ff;
 }
 
 .badge-success {
-  color: #6ee7a0;
-  background-color: rgba(34, 197, 94, 0.16);
+  color: #34a853;
+  background-color: #e9f8ee;
 }
 
 .badge-danger {
-  color: #fca5a5;
-  background-color: rgba(239, 68, 68, 0.16);
+  color: #e54d42;
+  background-color: #fdecea;
 }
 
 .badge-warn {
-  color: #fcd34d;
-  background-color: rgba(245, 158, 11, 0.16);
+  color: #d48806;
+  background-color: #fff4e5;
 }
 
 .badge-neutral {
-  color: #cbd5e1;
-  background-color: rgba(148, 163, 184, 0.14);
+  color: #666666;
+  background-color: #f0f2f5;
 }
 
 .card-empty {
@@ -517,7 +547,35 @@ export default {
 
 .card-empty-text {
   font-size: 24rpx;
-  color: #6b7489;
+  color: #999999;
+}
+
+.card-more {
+  display: block;
+  font-size: 20rpx;
+  color: #999999;
+  padding: 14rpx 22rpx 0;
+}
+
+.card-actions {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  padding: 0 22rpx 20rpx;
+}
+
+.card-action {
+  background-color: #eaf3ff;
+  border: 1rpx solid #b9d4ff;
+  border-radius: 14rpx;
+  padding: 12rpx 20rpx;
+  margin-right: 12rpx;
+  margin-bottom: 8rpx;
+}
+
+.card-action-text {
+  font-size: 22rpx;
+  color: #007aff;
 }
 
 /* ---------------- 思考态 ---------------- */
@@ -530,13 +588,13 @@ export default {
   width: 8rpx;
   height: 8rpx;
   border-radius: 4rpx;
-  background-color: #7c8cff;
+  background-color: #007aff;
   margin-right: 8rpx;
 }
 
 .thinking-text {
   font-size: 24rpx;
-  color: #8b93a8;
+  color: #999999;
   margin-left: 4rpx;
 }
 
@@ -548,7 +606,7 @@ export default {
 .composer {
   flex-shrink: 0;
   padding: 8rpx 24rpx 24rpx;
-  background-color: #0b0e14;
+  background-color: #f5f6fa;
 }
 
 .chips {
@@ -572,40 +630,40 @@ export default {
   padding: 0 24rpx;
   margin-right: 14rpx;
   border-radius: 30rpx;
-  background-color: #131826;
-  border: 1rpx solid #242d42;
+  background-color: #eef0f5;
 }
 
 .chip-text {
   font-size: 23rpx;
-  color: #9aa6c8;
+  color: #555555;
 }
 
 .input-bar {
   display: flex;
   flex-direction: row;
   align-items: center;
-  background-color: #151a26;
-  border-radius: 28rpx;
-  padding: 10rpx 10rpx 10rpx 26rpx;
+  background-color: #ffffff;
+  border: 1rpx solid #dcdfe6;
+  border-radius: 16rpx;
+  padding: 10rpx 10rpx 10rpx 24rpx;
 }
 
 .input {
   flex: 1;
   height: 72rpx;
   font-size: 28rpx;
-  color: #eef1f8;
+  color: #333333;
 }
 
 .input-ph {
-  color: #5c6478;
+  color: #bbbbbb;
 }
 
 .send-btn {
   width: 68rpx;
   height: 68rpx;
   border-radius: 34rpx;
-  background-color: #2a3142;
+  background-color: #c9ced8;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -614,8 +672,7 @@ export default {
 }
 
 .send-btn-active {
-  background-color: #4f6bff;
-  background-image: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+  background-color: #007aff;
 }
 
 .send-icon {
@@ -627,7 +684,7 @@ export default {
 .disclaimer {
   display: block;
   font-size: 19rpx;
-  color: #4b5468;
+  color: #aaaaaa;
   text-align: center;
   margin-top: 14rpx;
 }
