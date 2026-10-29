@@ -1,0 +1,85 @@
+<template>
+  <view class="page">
+    <view class="card">
+      <view class="title">学生登录</view>
+      <view class="subtitle">请输入姓名和学号</view>
+
+      <view class="form-item">
+        <text class="label">姓名</text>
+        <input v-model="form.name" class="input" placeholder="请输入姓名" />
+      </view>
+
+      <view class="form-item">
+        <text class="label">学号</text>
+        <input v-model="form.studentNo" class="input" placeholder="请输入学号" />
+      </view>
+
+      <view v-if="errorMsg" class="error">{{ errorMsg }}</view>
+
+      <button class="btn" type="primary" :loading="loading" @click="handleLogin">登录</button>
+      <button class="back-btn" @click="goBack">返回</button>
+
+      <view class="tip">测试账号：张三 / 2024001</view>
+    </view>
+  </view>
+</template>
+
+<script lang="ts">
+import { findStudent } from '@/utils/userData.uts'
+
+export default {
+  data() {
+    return {
+      form: { name: '', studentNo: '' },
+      errorMsg: '',
+      loading: false,
+    }
+  },
+  methods: {
+    handleLogin() {
+      this.errorMsg = ''
+      const name = this.form.name.trim()
+      const studentNo = this.form.studentNo.trim()
+
+      if (!name || !studentNo) { this.errorMsg = '请填写完整信息'; return }
+
+      this.loading = true
+      setTimeout(() => {
+        const matched = findStudent(name, studentNo)
+        this.loading = false
+        if (!matched) { this.errorMsg = '姓名或学号不正确'; return }
+
+        uni.showToast({ title: '登录成功', icon: 'success' })
+        this.jumpToSignin(matched.name, matched.studentNo, 'student')
+      }, 500)
+    },
+    jumpToSignin(name: string, studentNo: string, role: string) {
+      uni.navigateTo({
+        url: `/pages/student/signin?name=${encodeURIComponent(name)}&studentNo=${encodeURIComponent(studentNo)}&role=${role}`,
+        fail: (err) => {
+          uni.showModal({
+            title: '跳转失败',
+            content: JSON.stringify(err),
+            showCancel: false
+          })
+        }
+      })
+    },
+    goBack() { uni.navigateBack() }
+  },
+}
+</script>
+
+<style>
+.page { min-height: 100vh; padding: 40rpx 30rpx; background-color: #f5f6fa; box-sizing: border-box; }
+.card { background-color: #ffffff; border-radius: 20rpx; padding: 40rpx 30rpx; }
+.title { font-size: 40rpx; font-weight: bold; color: #222; text-align: center; }
+.subtitle { font-size: 26rpx; color: #999; text-align: center; margin-top: 10rpx; margin-bottom: 40rpx; }
+.form-item { margin-bottom: 30rpx; }
+.label { display: block; font-size: 28rpx; color: #555; margin-bottom: 12rpx; }
+.input { width: 100%; height: 80rpx; padding: 0 20rpx; border: 1rpx solid #ddd; border-radius: 12rpx; font-size: 28rpx; box-sizing: border-box; background-color: #fafafa; }
+.error { color: #e54d42; font-size: 26rpx; margin-bottom: 20rpx; }
+.btn { width: 100%; height: 80rpx; line-height: 80rpx; border-radius: 12rpx; font-size: 30rpx; margin-top: 20rpx; }
+.back-btn { width: 100%; height: 80rpx; line-height: 80rpx; border-radius: 12rpx; font-size: 30rpx; margin-top: 20rpx; background-color: #f0f0f0; color: #555; }
+.tip { margin-top: 30rpx; font-size: 24rpx; color: #999; text-align: center; }
+</style>

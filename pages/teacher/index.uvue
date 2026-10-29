@@ -1,0 +1,66 @@
+<template>
+  <view class="page">
+    <view class="header">
+      <text class="title">教师控制台</text>
+      <text class="subtitle">欢迎，{{ userName }} 老师</text>
+    </view>
+
+    <view class="menu-list">
+      <view class="menu-card" @click="goPage('courses')">
+        <text class="menu-icon">📚</text>
+        <view class="menu-info">
+          <text class="menu-title">我的课程管理</text>
+          <text class="menu-desc">发布新课程、修改或删除课程</text>
+        </view>
+        <text class="arrow">></text>
+      </view>
+
+      <view class="menu-card" @click="goPage('checkins')">
+        <text class="menu-icon">📝</text>
+        <view class="menu-info">
+          <text class="menu-title">我的签到记录</text>
+          <text class="menu-desc">查看、修改、删除学生签到</text>
+        </view>
+        <text class="arrow">></text>
+      </view>
+    </view>
+
+    <button class="logout-btn" @click="goBack">退出登录</button>
+  </view>
+</template>
+
+<script lang="ts">
+export default {
+  data() {
+    return { userName: '' }
+  },
+  onLoad(options: any) {
+    if (options && options.name) this.userName = decodeURIComponent(String(options.name))
+  },
+  methods: {
+    goPage(type: string) {
+      if (type === 'courses') {
+        uni.navigateTo({ url: `/pages/teacher/courses?teacherName=${encodeURIComponent(this.userName)}` })
+      } else if (type === 'checkins') {
+        uni.navigateTo({ url: `/pages/teacher/checkins?teacherName=${encodeURIComponent(this.userName)}` })
+      }
+    },
+    goBack() { uni.navigateBack() }
+  }
+}
+</script>
+
+<style>
+.page { min-height: 100vh; background-color: #f5f6fa; padding: 40rpx 30rpx; box-sizing: border-box; }
+.header { margin-bottom: 40rpx; padding-left: 10rpx; }
+.title { font-size: 44rpx; font-weight: bold; color: #333; display: block; }
+.subtitle { font-size: 28rpx; color: #888; margin-top: 10rpx; display: block; }
+.menu-list { display: flex; flex-direction: column; }
+.menu-card { background-color: #fff; border-radius: 20rpx; padding: 30rpx; display: flex; flex-direction: row; align-items: center; margin-bottom: 24rpx; }
+.menu-icon { font-size: 50rpx; margin-right: 20rpx; }
+.menu-info { flex: 1; display: flex; flex-direction: column; }
+.menu-title { font-size: 32rpx; font-weight: bold; color: #222; }
+.menu-desc { font-size: 24rpx; color: #999; margin-top: 6rpx; }
+.arrow { color: #ccc; font-size: 32rpx; }
+.logout-btn { width: 100%; height: 90rpx; line-height: 90rpx; background-color: #fff; color: #e54d42; border-radius: 16rpx; font-size: 32rpx; margin-top: 40rpx; }
+</style>

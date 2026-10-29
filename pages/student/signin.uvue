@@ -1,0 +1,261 @@
+<template>
+  <view class="page">
+    <view class="picker-wrap">
+      <picker mode="selector" :range="courseNames" :value="currentIndex" @change="onCourseChange">
+        <view class="picker-box">
+          <text class="picker-text">当前课程：{{ currentCourseName }}</text>
+          <text class="picker-arrow">▼</text>
+        </view>
+      </picker>
+    </view>
+
+    <view class="header-card">
+      <text class="course-name">{{ course ? course.name : '未找到课程' }}</text>
+      <text class="role-tag" :class="'tag-' + userRole">{{ roleText }}：{{ userName }}</text>
+      <text class="course-time" v-if="course">开课时间：{{ course.startTime }}</text>
+      <text class="status-tip" :class="statusClass">{{ statusText }}</text>
+    </view>
+
+    <view class="btn-wrap">
+      <view class="sign-btn" :class="btnClass" @click="handleSign">
+        <text class="sign-btn-text">{{ btnText }}</text>
+      </view>
+    </view>
+
+    <text class="location-tip" :class="inRange ? 'in-range' : 'out-range'">
+      {{ locationText }}
+    </text>
+
+    <button class="refresh-btn" @click="refreshLocation">重新定位</button>
+    <button class="back-btn" @click="goBack">返回登录</button>
+  </view>
+</template>
+
+<script lang="ts">
+import { getCourseById, courses, type Course } from '@/utils/courseData.uts'
+import { addCheckinRecord, checkinTable } from '@/utils/checkinData.uts'
+
+const SIGN_RANGE = 50
+
+export default {
+  data() {
+    return {
+      userName: '',
+      studentNo: '',
+      userRole: '',
+      allCourses: courses,
+      currentIndex: 0,
+      currentLat: 0,
+      currentLng: 0,
+      distance: null as number | null,
+      signed: false,
+      nowTime: new Date(),
+      timer: null as number | null,
+    }
+  },
+  computed: {
+    roleText(): string {
+      if (this.userRole === 'student') return '学生'
+      if (this.userRole === 'teacher') return '教师'
+      if (this.userRole === 'admin') return '管理员'
+      return '用户'
+    },
+    courseNames(): string[] {
+      return this.allCourses.map(item => item.name)
+    },
+    currentCourseName(): string {
+      return this.courseNames[this.currentIndex] || '请选择'
+    },
+    course(): Course | null {
+      if (this.allCourses.length === 0) return null
+      const baseCourse = this.allCourses[this.currentIndex]
+
+      if (baseCourse && baseCourse.id === 0) {
+        const now = new Date()
+        const pad = (n: number) => (n < 10 ? '0' + n : n)
+        const formatDate = (d: Date) => {
+          return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+        }
+        return {
+          id: 0,
+          name: baseCourse.name,
+          latitude: this.currentLat || 34.2351,
+          longitude: this.currentLng || 108.9153,
+          startTime: formatDate(now),
+          signStart: '2000-01-01 00:00',
+          signEnd: '2099-12-31 23:59',
+        }
+      }
+      return baseCourse
+    },
+    inRange(): boolean { return this.distance !== null && this.distance <= SIGN_RANGE },
+    inSignTime(): boolean {
+      if (!this.course) return false
+      const t = this.nowTime.getTime()
+      const start = new Date(this.course.signStart.replace(/-/g, '/')).getTime()
+      const end = new Date(this.course.signEnd.replace(/-/g, '/')).getTime()
+      return t >= start && t <= end
+    },
+    minutesToStart(): number | null {
+      if (!this.course) return null
+      const t = this.nowTime.getTime()
+      const start = new Date(this.course.startTime.replace(/-/g, '/')).getTime()
+      return Math.round((start - t) / 60000)
+    },
+    canSign(): boolean { return !this.signed && this.inSignTime && this.inRange },
+    btnClass(): string {
+      if (this.signed) return 'btn-signed'
+      return this.canSign ? 'btn-blue' : 'btn-red'
+    },
+    btnText(): string { return this.signed ? '已签到' : '签到' },
+    statusText(): string {
+      if (this.signed) return '已签到'
+      if (!this.inSignTime) {
+        if (this.minutesToStart !== null && this.minutesToStart > 0) {
+          return `距离开课 ${this.minutesToStart} 分钟`
+        }
+        return '不在签到时间段内'
+      }
+      return '可签到'
+    },
+    statusClass(): string {
+      if (this.signed) return 'status-signed'
+      if (!this.inSignTime) return 'status-wait'
+      return 'status-ready'
+    },
+    locationText(): string {
+      if (this.distance === null) return '正在获取位置...'
+      if (this.inRange) return `当前位置在范围内（${Math.round(this.distance)} 米）`
+      return `当前位置不在范围内，距签到点 ${Math.round(this.distance)} 米`
+    },
+  },
+  onLoad(options: any) {
+    if (options) {
+      if (options.name) this.userName = decodeURIComponent(String(options.name))
+      if (options.studentNo) this.studentNo = decodeURIComponent(String(options.studentNo))
+      if (options.role) this.userRole = decodeURIComponent(String(options.role))
+    }
+
+    // 初始化时检查一次签到状态
+    this.checkSignStatus()
+
+    this.timer = setInterval(() => { this.nowTime = new Date() }, 1000) as unknown as number
+    this.refreshLocation()
+  },
+  onUnload() {
+    if (this.timer !== null) clearInterval(this.timer)
+  },
+  methods: {
+    // ===== 新增：读取签到表判断是否已签到 =====
+    checkSignStatus() {
+      if (!this.course) return
+
+      // 在签到表中查找：当前用户 + 当前课程 + 结果成功的记录
+      const record = checkinTable.find(
+        (r) => r.userName === this.userName &&
+               r.courseId === this.course?.id &&
+               r.result === 'success'
+      )
+
+      // 如果找到了，说明已经签过到了
+      this.signed = !!record
+    },
+    onCourseChange(e: any) {
+      this.currentIndex = parseInt(e.detail.value)
+      // 切换课程后，重新检查这门课是否已经签过
+      this.checkSignStatus()
+      this.calculateDistance()
+    },
+    refreshLocation() {
+      if (typeof navigator !== 'undefined' && navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            this.currentLat = position.coords.latitude
+            this.currentLng = position.coords.longitude
+            this.calculateDistance()
+          },
+          () => {
+            this.currentLat = 34.2353
+            this.currentLng = 108.9155
+            this.calculateDistance()
+          },
+          { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+        )
+      } else {
+        this.currentLat = 34.2353
+        this.currentLng = 108.9155
+        this.calculateDistance()
+      }
+    },
+    calculateDistance() {
+      if (this.course && this.currentLat !== 0) {
+        this.distance = this.getDistance(
+          this.currentLat, this.currentLng,
+          this.course.latitude, this.course.longitude
+        )
+      }
+    },
+    getDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
+      const R = 6371000
+      const rad = (d: number) => (d * Math.PI) / 180
+      const dLat = rad(lat2 - lat1)
+      const dLng = rad(lng2 - lng1)
+      const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2)
+      const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+      return R * c
+    },
+    handleSign() {
+      if (this.signed) { uni.showToast({ title: '已经签到过了', icon: 'none' }); return }
+      if (!this.inSignTime) { uni.showToast({ title: '不在签到时间段内', icon: 'none' }); return }
+      if (!this.inRange) { uni.showToast({ title: '不在签到范围内', icon: 'none' }); return }
+
+      this.signed = true
+      const now = new Date()
+      const pad = (n: number) => (n < 10 ? '0' + n : n)
+      const timeStr = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`
+
+      addCheckinRecord({
+        userId: 1,
+        userName: this.userName || '未知用户',
+        courseId: this.course ? this.course.id : 0,
+        courseName: this.course ? this.course.name : '未知课程',
+        checkinTime: timeStr,
+        location: `${this.currentLat.toFixed(4)}, ${this.currentLng.toFixed(4)}`,
+        result: 'success'
+      })
+      uni.showToast({ title: '签到成功', icon: 'success' })
+    },
+    goBack() { uni.navigateBack() },
+  },
+}
+</script>
+
+<style>
+.page { min-height: 100vh; background-color: #f5f6fa; padding: 20rpx 30rpx 40rpx; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; }
+.picker-wrap { width: 100%; margin-bottom: 20rpx; }
+.picker-box { width: 100%; height: 90rpx; background-color: #ffffff; border-radius: 16rpx; display: flex; flex-direction: row; align-items: center; justify-content: space-between; padding: 0 30rpx; box-sizing: border-box; border: 2rpx solid #e0e0e0; }
+.picker-text { font-size: 30rpx; color: #333333; font-weight: 500; }
+.picker-arrow { font-size: 24rpx; color: #999999; }
+.header-card { width: 100%; background-color: #ffffff; border-radius: 20rpx; padding: 30rpx; box-sizing: border-box; text-align: center; }
+.course-name { font-size: 38rpx; font-weight: bold; color: #222222; }
+.role-tag { display: inline-block; font-size: 24rpx; padding: 4rpx 16rpx; border-radius: 20rpx; margin-top: 10rpx; margin-bottom: 10rpx; }
+.tag-student { background-color: #e6f0ff; color: #007aff; }
+.tag-teacher { background-color: #4cd964; color: #fff; }
+.tag-admin { background-color: #fff4e6; color: #ff9500; }
+.course-time { font-size: 26rpx; color: #888888; display: block; }
+.status-tip { margin-top: 20rpx; font-size: 28rpx; font-weight: 500; display: block; }
+.status-ready { color: #007aff; }
+.status-wait { color: #ff9500; }
+.status-signed { color: #4cd964; }
+.btn-wrap { flex: 1; display: flex; align-items: center; justify-content: center; width: 100%; }
+.sign-btn { width: 400rpx; height: 400rpx; border-radius: 200rpx; display: flex; align-items: center; justify-content: center; }
+.btn-blue { background-color: #007aff; }
+.btn-red { background-color: #ff3b30; }
+.btn-signed { background-color: #4cd964; }
+.sign-btn-text { color: #ffffff; font-size: 64rpx; font-weight: bold; letter-spacing: 8rpx; }
+.location-tip { font-size: 28rpx; margin-bottom: 30rpx; text-align: center; }
+.in-range { color: #4cd964; }
+.out-range { color: #ff3b30; }
+.refresh-btn { font-size: 26rpx; color: #666666; background-color: #ffffff; border-radius: 12rpx; padding: 0 40rpx; margin-bottom: 20rpx; }
+.back-btn { font-size: 26rpx; color: #999999; background-color: transparent; border: none; }
+</style>

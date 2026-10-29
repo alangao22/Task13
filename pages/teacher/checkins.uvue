@@ -1,0 +1,107 @@
+<template>
+  <view class="page">
+    <view class="top-bar">
+      <button class="top-btn edit-btn" :class="{ 'active-mode': mode === 'edit' }" @click="toggleMode('edit')">修改结果</button>
+      <button class="top-btn del-btn" :class="{ 'active-mode': mode === 'delete' }" @click="toggleMode('delete')">删除记录</button>
+    </view>
+
+    <view v-if="mode !== 'normal'" class="hint-bar">
+      请点击下方列表选择要{{ mode === 'edit' ? '修改' : '删除' }}的记录
+      <text class="cancel-text" @click="toggleMode('normal')">取消</text>
+    </view>
+
+    <view class="list">
+      <view class="record" v-for="(item, index) in myRecords" :key="item.id" @click="onItemClick(item, index)">
+        <view class="rec-head">
+          <text class="rec-course">{{ item.courseName }}</text>
+          <text class="rec-result" :class="item.result === 'success' ? 'text-green' : 'text-red'">
+            {{ item.result === 'success' ? '成功' : '失败' }}
+          </text>
+        </view>
+        <text class="rec-info">用户：{{ item.userName }}</text>
+        <text class="rec-info">时间：{{ item.checkinTime }}</text>
+        <text class="rec-info">位置：{{ item.location }}</text>
+      </view>
+      <view v-if="myRecords.length === 0" class="empty">您的课程暂无签到记录</view>
+    </view>
+  </view>
+</template>
+
+<script lang="ts">
+import { checkinTable } from '@/utils/checkinData.uts'
+import { courses } from '@/utils/courseData.uts'
+
+export default {
+  data() {
+    return {
+      teacherName: '',
+      allRecords: checkinTable,
+      allCourses: courses,
+      mode: 'normal'
+    }
+  },
+  computed: {
+    myRecords(): any[] {
+      const myCourseIds = this.allCourses
+        .filter(c => c.teacherName === this.teacherName)
+        .map(c => c.id)
+
+      return this.allRecords.filter(r => myCourseIds.includes(r.courseId))
+    }
+  },
+  onLoad(options: any) {
+    if (options && options.teacherName) {
+      this.teacherName = decodeURIComponent(String(options.teacherName))
+    }
+  },
+  methods: {
+    toggleMode(m: string) {
+      this.mode = this.mode === m ? 'normal' : m;
+    },
+    onItemClick(record: any, index: number) {
+      if (this.mode === 'edit') {
+        const realIndex = this.allRecords.findIndex(r => r.id === record.id);
+        this.allRecords[realIndex].result = this.allRecords[realIndex].result === 'success' ? 'fail' : 'success';
+        this.allRecords = [...checkinTable];
+        this.mode = 'normal';
+        uni.showToast({ title: '结果已切换', icon: 'none' });
+      } else if (this.mode === 'delete') {
+        uni.showModal({
+          title: '确认删除',
+          content: `确定要删除【${record.userName}】的这条记录吗？`,
+          success: (res) => {
+            if (res.confirm) {
+              const realIndex = this.allRecords.findIndex(r => r.id === record.id);
+              this.allRecords.splice(realIndex, 1);
+              this.allRecords = [...checkinTable];
+              this.mode = 'normal';
+              uni.showToast({ title: '已删除', icon: 'success' });
+            }
+          }
+        });
+      }
+    }
+  }
+}
+</script>
+
+<style>
+.page { min-height: 100vh; background-color: #f5f6fa; padding: 20rpx 30rpx; box-sizing: border-box; }
+.top-bar { display: flex; flex-direction: row; justify-content: space-between; margin-bottom: 20rpx; width: 100%; }
+.top-btn { flex: 1; height: 70rpx; line-height: 70rpx; font-size: 26rpx; border-radius: 12rpx; margin: 0 10rpx; color: #fff; padding: 0; }
+.top-btn:first-child { margin-left: 0; }
+.top-btn:last-child { margin-right: 0; }
+.edit-btn { background-color: #ff9500; }
+.del-btn { background-color: #ff3b30; }
+.active-mode { opacity: 0.6; border: 4rpx solid #333; }
+.hint-bar { background-color: #fff4e6; color: #ff9500; padding: 20rpx; text-align: center; font-size: 26rpx; border-radius: 12rpx; margin-bottom: 20rpx; }
+.cancel-text { color: #007aff; margin-left: 20rpx; text-decoration: underline; }
+.record { background-color: #fff; border-radius: 20rpx; padding: 30rpx; margin-bottom: 24rpx; display: flex; flex-direction: column; }
+.rec-head { display: flex; justify-content: space-between; margin-bottom: 10rpx; }
+.rec-course { font-size: 32rpx; font-weight: bold; color: #333; }
+.rec-result { font-size: 28rpx; font-weight: bold; }
+.text-green { color: #4cd964; }
+.text-red { color: #e54d42; }
+.rec-info { font-size: 26rpx; color: #666; margin-top: 6rpx; }
+.empty { text-align: center; color: #999; font-size: 28rpx; padding: 40rpx 0; }
+</style>

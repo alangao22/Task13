@@ -1,0 +1,156 @@
+<template>
+  <view class="page">
+    <view class="top-bar">
+      <button class="top-btn add-btn" @click="openAdd">新增用户</button>
+      <button class="top-btn edit-btn" :class="{ 'active-mode': mode === 'edit' }" @click="toggleMode('edit')">修改</button>
+      <button class="top-btn del-btn" :class="{ 'active-mode': mode === 'delete' }" @click="toggleMode('delete')">删除</button>
+    </view>
+
+    <view v-if="mode !== 'normal'" class="hint-bar">
+      请点击下方列表选择要{{ mode === 'edit' ? '修改' : '删除' }}的用户
+      <text class="cancel-text" @click="toggleMode('normal')">取消</text>
+    </view>
+
+    <view class="list">
+      <view class="user-card" v-for="(user, index) in userList" :key="user.id" @click="onItemClick(user, index)">
+        <view class="user-top">
+          <text class="name">{{ user.name }}</text>
+          <text class="role-tag" :class="'tag-' + user.role">{{ roleText(user.role) }}</text>
+        </view>
+        <view class="user-bottom">
+          <text class="account">账号：{{ user.studentNo }}</text>
+          <text class="phone" v-if="user.phone">手机：{{ user.phone }}</text>
+        </view>
+      </view>
+    </view>
+
+    <view class="modal-mask" v-if="showModal">
+      <view class="modal">
+        <view class="modal-title">{{ isEdit ? '修改用户' : '新增用户' }}</view>
+        <input class="modal-input" v-model="form.name" placeholder="姓名" />
+        <input class="modal-input" v-model="form.studentNo" placeholder="学号/工号" />
+        <input class="modal-input" v-model="form.phone" placeholder="手机号(可选)" />
+        <picker :range="roles" @change="(e:any) => form.role = roles[e.detail.value]">
+          <view class="modal-input">身份：{{ form.role }}</view>
+        </picker>
+
+        <view class="modal-actions">
+          <button class="cancel-btn" @click="showModal = false">取消</button>
+          <button class="save-btn" @click="saveUser">保存</button>
+        </view>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script lang="ts">
+import { users } from '@/utils/userData.uts'
+
+export default {
+  data() {
+    return {
+      userList: users,
+      mode: 'normal',
+      showModal: false,
+      isEdit: false,
+      editIndex: -1,
+      roles: ['student', 'teacher', 'admin'],
+      form: { name: '', studentNo: '', phone: '', role: 'student' }
+    }
+  },
+  methods: {
+    roleText(role: string) {
+      if (role === 'student') return '学生'
+      if (role === 'teacher') return '教师'
+      return '管理员'
+    },
+    toggleMode(m: string) {
+      this.mode = this.mode === m ? 'normal' : m;
+    },
+    openAdd() {
+      this.isEdit = false;
+      this.form = { name: '', studentNo: '', phone: '', role: 'student' };
+      this.mode = 'normal';
+      this.showModal = true;
+    },
+    onItemClick(user: any, index: number) {
+      if (this.mode === 'edit') {
+        this.isEdit = true;
+        this.editIndex = index;
+        this.form = { ...user };
+        this.showModal = true;
+      } else if (this.mode === 'delete') {
+        uni.showModal({
+          title: '确认删除',
+          content: `确定要删除用户【${user.name}】吗？`,
+          success: (res) => {
+            if (res.confirm) {
+              this.userList.splice(index, 1);
+              this.userList = [...users];
+              this.mode = 'normal';
+              uni.showToast({ title: '已删除', icon: 'success' });
+            }
+          }
+        });
+      }
+    },
+    saveUser() {
+      if (!this.form.name || !this.form.studentNo) {
+        uni.showToast({ title: '姓名和账号必填', icon: 'none' });
+        return;
+      }
+
+      // 【修复】强制转换类型
+      const roleValue = this.form.role as "student" | "teacher" | "admin"
+
+      if (this.isEdit && this.editIndex >= 0) {
+        this.userList.splice(this.editIndex, 1, {
+          ...this.form,
+          role: roleValue,
+          id: this.userList[this.editIndex].id
+        });
+      } else {
+        this.userList.push({
+          ...this.form,
+          role: roleValue,
+          id: Date.now()
+        });
+      }
+      this.userList = [...users];
+      this.showModal = false;
+      this.mode = 'normal';
+      uni.showToast({ title: '操作成功', icon: 'success' });
+    }
+  }
+}
+</script>
+
+<style>
+.page { min-height: 100vh; background-color: #f5f6fa; padding: 20rpx 30rpx; box-sizing: border-box; }
+.top-bar { display: flex; flex-direction: row; justify-content: space-between; margin-bottom: 20rpx; width: 100%; }
+.top-btn { flex: 1; height: 70rpx; line-height: 70rpx; font-size: 26rpx; border-radius: 12rpx; margin: 0 10rpx; color: #fff; padding: 0; }
+.top-btn:first-child { margin-left: 0; }
+.top-btn:last-child { margin-right: 0; }
+.add-btn { background-color: #007aff; }
+.edit-btn { background-color: #ff9500; }
+.del-btn { background-color: #ff3b30; }
+.active-mode { opacity: 0.6; border: 4rpx solid #333; }
+.hint-bar { background-color: #fff4e6; color: #ff9500; padding: 20rpx; text-align: center; font-size: 26rpx; border-radius: 12rpx; margin-bottom: 20rpx; }
+.cancel-text { color: #007aff; margin-left: 20rpx; text-decoration: underline; }
+.user-card { background-color: #fff; border-radius: 20rpx; padding: 30rpx; margin-bottom: 24rpx; }
+.user-top { display: flex; justify-content: space-between; margin-bottom: 20rpx; }
+.name { font-size: 34rpx; font-weight: bold; color: #333; }
+.role-tag { font-size: 24rpx; padding: 4rpx 16rpx; border-radius: 20rpx; }
+.tag-student { background-color: #e6f0ff; color: #007aff; }
+.tag-teacher { background-color: #e8f8ec; color: #4cd964; }
+.tag-admin { background-color: #fff4e6; color: #ff9500; }
+.user-bottom { display: flex; flex-direction: column; }
+.account, .phone { font-size: 26rpx; color: #666; margin-top: 8rpx; }
+.modal-mask { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 999; }
+.modal { background-color: #fff; width: 600rpx; border-radius: 20rpx; padding: 40rpx; box-sizing: border-box; }
+.modal-title { font-size: 36rpx; font-weight: bold; text-align: center; margin-bottom: 30rpx; }
+.modal-input { width: 100%; height: 80rpx; border: 1rpx solid #ddd; margin-bottom: 20rpx; padding: 0 20rpx; box-sizing: border-box; border-radius: 8rpx; font-size: 28rpx; }
+.modal-actions { display: flex; justify-content: space-between; margin-top: 40rpx; }
+.cancel-btn { width: 45%; background-color: #f0f0f0; color: #555; height: 70rpx; line-height: 70rpx; font-size: 28rpx; }
+.save-btn { width: 45%; background-color: #007aff; color: #fff; height: 70rpx; line-height: 70rpx; font-size: 28rpx; }
+</style>

@@ -1,0 +1,52 @@
+import { type User } from './userData.uts'
+import { type Course } from './courseData.uts'
+
+export type CheckinRecord = {
+  id: number
+  userId: number
+  userName: string
+  courseId: number
+  courseName: string
+  checkinTime: string
+  location: string
+  result: 'success' | 'fail'
+}
+
+export const checkinTable: CheckinRecord[] = [
+  {
+    id: 1,
+    userId: 1,
+    userName: '张三',
+    courseId: 1,
+    courseName: '移动应用开发',
+    checkinTime: '2026-10-22 08:05',
+    location: '34.2351, 108.9153',
+    result: 'success'
+  },
+  {
+    id: 2,
+    userId: 2,
+    userName: '李四',
+    courseId: 1,
+    courseName: '移动应用开发',
+    checkinTime: '2026-10-22 08:35',
+    location: '34.2351, 108.9153',
+    result: 'fail'
+  }
+]
+
+export function addCheckinRecord(record: Omit<CheckinRecord, 'id'>) {
+  // 明确指定类型
+  const newRecord: CheckinRecord = {
+    id: checkinTable.length + 1,
+    userId: record.userId,
+    userName: record.userName,
+    courseId: record.courseId,
+    courseName: record.courseName,
+    checkinTime: record.checkinTime,
+    location: record.location,
+    result: record.result
+  }
+  checkinTable.push(newRecord)
+  return newRecord
+}

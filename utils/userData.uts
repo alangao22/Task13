@@ -1,0 +1,27 @@
+// utils/userData.uts
+export type User = {
+  id: number
+  name: string
+  studentNo: string
+  role: 'student' | 'teacher' | 'admin'
+  phone?: string // 新增手机号
+  email?: string // 新增邮箱
+}
+
+export const users: User[] = [
+  { id: 1, name: '张三', studentNo: '2024001', role: 'student' },
+  { id: 2, name: '李四', studentNo: '2024002', role: 'student' },
+  { id: 4, name: '赵老师', studentNo: 'T001', role: 'teacher', phone: '13800000001', email: 'zhao@edu.com' },
+  { id: 5, name: '系统管理', studentNo: 'A001', role: 'admin', phone: '13900000001', email: 'admin@edu.com' },
+]
+
+export function findStudent(name: string, studentNo: string): User | null {
+  return users.find((u) => u.name === name && u.studentNo === studentNo && u.role === 'student') || null
+}
+
+export function findStaffByAccount(account: string, role: string): User | null {
+  // 支持手机号或邮箱匹配
+  return users.find(
+    (u) => u.role === role && (u.phone === account || u.email === account)
+  ) || null
+}

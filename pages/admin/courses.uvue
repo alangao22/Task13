@@ -1,0 +1,141 @@
+<template>
+  <view class="page">
+    <!-- 顶部操作区 (三个按钮平铺) -->
+    <view class="top-bar">
+      <button class="top-btn add-btn" @click="openAdd">新增课程</button>
+      <button class="top-btn edit-btn" :class="{ 'active-mode': mode === 'edit' }" @click="toggleMode('edit')">修改</button>
+      <button class="top-btn del-btn" :class="{ 'active-mode': mode === 'delete' }" @click="toggleMode('delete')">删除</button>
+    </view>
+
+    <view v-if="mode !== 'normal'" class="hint-bar">
+      请点击下方列表选择要{{ mode === 'edit' ? '修改' : '删除' }}的课程
+      <text class="cancel-text" @click="toggleMode('normal')">取消</text>
+    </view>
+
+    <!-- 列表区 -->
+    <view class="list">
+      <view class="course-card" v-for="(course, index) in courseList" :key="course.id" @click="onItemClick(course, index)">
+        <view class="c-head">
+          <text class="name">{{ course.name }}</text>
+        </view>
+        <text class="c-info">开课：{{ course.startTime }}</text>
+        <text class="c-info">可签：{{ course.signStart }} 至 {{ course.signEnd }}</text>
+        <text class="c-info">坐标：{{ course.latitude }}, {{ course.longitude }}</text>
+      </view>
+    </view>
+
+    <!-- 弹窗 -->
+    <view class="modal-mask" v-if="showModal">
+      <view class="modal">
+        <view class="modal-title">{{ isEdit ? '修改课程' : '新增课程' }}</view>
+        <input class="modal-input" v-model="form.name" placeholder="课程名称" />
+        <input class="modal-input" v-model="form.startTime" placeholder="开课时间 (如 2026-10-22 08:00)" />
+        <input class="modal-input" v-model="form.signStart" placeholder="签到开始时间" />
+        <input class="modal-input" v-model="form.signEnd" placeholder="签到结束时间" />
+        <input class="modal-input" v-model="form.latitude" placeholder="纬度 (如 34.2351)" type="digit" />
+        <input class="modal-input" v-model="form.longitude" placeholder="经度 (如 108.9153)" type="digit" />
+
+        <view class="modal-actions">
+          <button class="cancel-btn" @click="showModal = false">取消</button>
+          <button class="save-btn" @click="saveCourse">保存</button>
+        </view>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script lang="ts">
+import { courses } from '@/utils/courseData.uts'
+
+export default {
+  data() {
+    return {
+      courseList: courses,
+      mode: 'normal',
+      showModal: false,
+      isEdit: false,
+      editIndex: -1,
+      form: { name: '', startTime: '', signStart: '', signEnd: '', latitude: 0, longitude: 0 }
+    }
+  },
+  methods: {
+    toggleMode(m: string) {
+      this.mode = this.mode === m ? 'normal' : m;
+    },
+    openAdd() {
+      this.isEdit = false;
+      this.form = { name: '', startTime: '', signStart: '', signEnd: '', latitude: 0, longitude: 0 };
+      this.mode = 'normal';
+      this.showModal = true;
+    },
+    onItemClick(course: any, index: number) {
+      if (this.mode === 'edit') {
+        this.isEdit = true;
+        this.editIndex = index;
+        this.form = { ...course };
+        this.showModal = true;
+      } else if (this.mode === 'delete') {
+        uni.showModal({
+          title: '确认删除',
+          content: `确定要删除课程【${course.name}】吗？`,
+          success: (res) => {
+            if (res.confirm) {
+              this.courseList.splice(index, 1);
+              this.courseList = [...courses];
+              this.mode = 'normal';
+              uni.showToast({ title: '已删除', icon: 'success' });
+            }
+          }
+        });
+      }
+    },
+    saveCourse() {
+      if (!this.form.name || !this.form.startTime) {
+        uni.showToast({ title: '课程名和开课时间必填', icon: 'none' });
+        return;
+      }
+      if (this.isEdit && this.editIndex >= 0) {
+        this.courseList.splice(this.editIndex, 1, { ...this.form, id: this.courseList[this.editIndex].id });
+      } else {
+        this.courseList.push({ ...this.form, id: Date.now() });
+      }
+      this.courseList = [...courses];
+      this.showModal = false;
+      this.mode = 'normal';
+      uni.showToast({ title: '操作成功', icon: 'success' });
+    }
+  }
+}
+</script>
+
+<style>
+.page { min-height: 100vh; background-color: #f5f6fa; padding: 20rpx 30rpx; box-sizing: border-box; }
+
+/* 顶部平铺栏 */
+.top-bar { display: flex; flex-direction: row; justify-content: space-between; margin-bottom: 20rpx; width: 100%; }
+.top-btn { flex: 1; height: 70rpx; line-height: 70rpx; font-size: 26rpx; border-radius: 12rpx; margin: 0 10rpx; color: #fff; padding: 0; }
+.top-btn:first-child { margin-left: 0; }
+.top-btn:last-child { margin-right: 0; }
+
+.add-btn { background-color: #007aff; }
+.edit-btn { background-color: #ff9500; }
+.del-btn { background-color: #ff3b30; }
+.active-mode { opacity: 0.6; border: 4rpx solid #333; }
+
+.hint-bar { background-color: #fff4e6; color: #ff9500; padding: 20rpx; text-align: center; font-size: 26rpx; border-radius: 12rpx; margin-bottom: 20rpx; }
+.cancel-text { color: #007aff; margin-left: 20rpx; text-decoration: underline; }
+
+.course-card { background-color: #fff; border-radius: 20rpx; padding: 30rpx; margin-bottom: 24rpx; }
+.c-head { margin-bottom: 10rpx; }
+.name { font-size: 34rpx; font-weight: bold; color: #333; }
+.c-info { font-size: 26rpx; color: #666; display: block; margin-top: 6rpx; }
+
+/* 弹窗 */
+.modal-mask { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 999; }
+.modal { background-color: #fff; width: 600rpx; border-radius: 20rpx; padding: 40rpx; box-sizing: border-box; }
+.modal-title { font-size: 36rpx; font-weight: bold; text-align: center; margin-bottom: 30rpx; }
+.modal-input { width: 100%; height: 80rpx; border: 1rpx solid #ddd; margin-bottom: 20rpx; padding: 0 20rpx; box-sizing: border-box; border-radius: 8rpx; font-size: 28rpx; }
+.modal-actions { display: flex; justify-content: space-between; margin-top: 40rpx; }
+.cancel-btn { width: 45%; background-color: #f0f0f0; color: #555; height: 70rpx; line-height: 70rpx; font-size: 28rpx; }
+.save-btn { width: 45%; background-color: #007aff; color: #fff; height: 70rpx; line-height: 70rpx; font-size: 28rpx; }
+</style>

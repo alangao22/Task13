@@ -1,0 +1,56 @@
+{
+  "pages": [
+    {
+      "path": "pages/index/index",
+      "style": { "navigationBarTitleText": "选择身份" }
+    },
+    {
+      "path": "pages/login/student",
+      "style": { "navigationBarTitleText": "学生登录" }
+    },
+    {
+      "path": "pages/login/staff",
+      "style": { "navigationBarTitleText": "教职工登录" }
+    },
+    {
+      "path": "pages/student/signin",
+      "style": { "navigationBarTitleText": "课程签到" }
+    },
+    {
+      "path": "pages/admin/index",
+      "style": { "navigationBarTitleText": "管理控制台" }
+    },
+    {
+      "path": "pages/admin/users",
+      "style": { "navigationBarTitleText": "用户管理" }
+    },
+    {
+      "path": "pages/admin/courses",
+      "style": { "navigationBarTitleText": "课程管理" }
+    },
+    {
+      "path": "pages/admin/checkins",
+      "style": { "navigationBarTitleText": "签到管理" }
+    },
+    {
+      "path": "pages/admin/agent",
+      "style": {
+        "navigationBarTitleText": "AI 助手",
+        "navigationBarBackgroundColor": "#0b0e14",
+        "navigationBarTextStyle": "white"
+      }
+    },
+    {
+      "path": "pages/teacher/index",
+      "style": { "navigationBarTitleText": "教师控制台" }
+    },
+    {
+      "path": "pages/teacher/courses",
+      "style": { "navigationBarTitleText": "我的课程" }
+    },
+    {
+      "path": "pages/teacher/checkins",
+      "style": { "navigationBarTitleText": "我的签到记录" }
+    }
+  ]
+}

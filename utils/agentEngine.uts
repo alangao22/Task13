@@ -1,0 +1,914 @@
+// utils/agentEngine.uts
+// 基于规则的签到业务 Agent 引擎（纯前端模拟，不调用任何外部服务）。
+//
+// 防御顺序：
+// 1. 长度限制 -> 2. 归一化（全角/零宽/空白）-> 3. 敏感词 + 注入正则拦截
+// 4. 待确认删除动作 -> 5. 业务意图白名单 -> 6. 统一兜底话术
+//
+// 引擎只读 / 操作三张业务表：users、courses、checkinTable。
+// 删除类操作必须经过"二次确认"，且拒绝批量清空与受保护数据。
+
+import { users, type User } from './userData.uts'
+import { courses, type Course } from './courseData.uts'
+import { checkinTable, type CheckinRecord } from './checkinData.uts'
+
+export type AgentReplyType = 'text' | 'card' | 'error'
+
+export type AgentCardItem = {
+  title: string
+  subtitle: string
+  badge: string
+  badgeType: string
+}
+
+export type AgentCard = {
+  title: string
+  subtitle: string
+  count: number
+  items: AgentCardItem[]
+}
+
+export type AgentReply = {
+  type: AgentReplyType
+  content: string
+  data: AgentCard
+}
+
+export type ChatMessage = {
+  id: string
+  role: 'user' | 'agent'
+  type: 'text' | 'card'
+  content: string
+  data: AgentCard
+}
+
+// 命中黑名单或未匹配到任何业务意图时，统一使用这句话。
+export const REFUSAL_MESSAGE: string = '我是签到业务助理，仅支持处理用户、课程和签到数据的查询与操作哦。'
+
+const MAX_INPUT_LENGTH: number = 120
+
+// ------------------------------ 业务词表 ------------------------------
+
+const DELETE_WORDS: string[] = ['删除', '删掉', '删了', '移除', '清除', '清空', '干掉', '去掉']
+const CHECKIN_WORDS: string[] = ['签到', '打卡', '考勤']
+const COURSE_WORDS: string[] = ['课程', '课表', '上课', '课堂', '的课']
+const USER_WORDS: string[] = ['用户', '人员', '学生', '老师', '教师', '管理员', '账号', '学号', '名单']
+const STAT_WORDS: string[] = ['统计', '数量', '多少', '几个', '人数', '汇总', '成功率', '占比', '比例']
+const LATEST_WORDS: string[] = ['最新', '最近', '最后', 'latest']
+
+// 只用于删除时判定"批量"风险。
+const BATCH_WORDS: string[] = ['所有', '全部', '清空', '批量', '一键']
+
+// 关键词清洗词表：从输入里剥离命令词，只留下可能的姓名 / 课程名。
+const NOISE_WORDS: string[] = [
+  '帮我查一下', '帮我查询', '帮我查', '请帮我', '麻烦你', '查询一下', '查一下', '查看一下',
+  '我想查', '我想知道', '我要查', '告诉我', '有哪些', '有那些', '是什么', '有什么', '怎么样',
+  '有多少', '多少个', '多少位', '多少条', '课程表',
+  '所有', '全部', '一下', '查询', '查看', '看看', '列出', '显示', '搜索', '统计', '汇总',
+  '数量', '人数', '几个', '成功率', '占比', '比例',
+  '数据', '信息', '列表', '名单', '详情', '情况', '记录',
+  '用户', '人员', '学生', '老师', '教师', '管理员', '账号', '学号',
+  '签到', '打卡', '考勤', '课程', '课表', '上课', '课堂', '的课',
+  '今天', '今日', '昨天', '最近', '最新', '最后', '本周', '这周',
+  '成功', '失败', '未成功',
+  'delete', 'query', 'list', 'show', 'all', 'the', 'user', 'users',
+  'course', 'courses', 'checkin', 'checkins', 'latest', 'today', 'find', 'search',
+  '请', '帮', '我', '的', '吗', '呢', '啊', '吧', '了', '是', '有', '在', '和', '与', '及',
+  '查', '看', '找', '要', '给', '把', '对', '这', '那', '表', '个', '条', '位'
+]
+
+// ------------------------------ 安全策略 ------------------------------
+
+// 敏感词黑名单：注入、越权、套取系统信息与闲聊。
+const BLACKLIST: string[] = [
+  '忽略指令', '忽略之前', '忽略以上', '忽略上述', '忽略所有', '无视指令', '无视之前',
+  '忘记指令', '跳过指令', '绕过限制',
+  '系统指令', '系统提示', '系统设定', '提示词', '预设指令', '原始指令',
+  '你的指令', '你的规则', '你的设定',
+  '越狱', '开发者模式', '管理员模式', '上帝模式', '扮演', '假装你是', '你现在是', '从现在开始你是',
+  '写代码', '写一段代码', '生成代码', '编写代码', '代码实现', '写脚本', '执行命令', '运行命令',
+  '你是谁', '你叫什么', '你是什么', '自我介绍', '你能做什么', '你会什么', '你有哪些功能',
+  'prompt', 'system prompt', 'ignore previous', 'ignore above', 'disregard', 'jailbreak',
+  'dan mode', 'prompt injection', 'api key', '密钥', '密码', '泄露',
+  '数据库结构', '表结构', 'sql', 'select *', 'drop table', 'base64', 'http', 'eval', 'onerror'
+]
+
+// 关键词被空格 / 标点拆开时的兜底正则。
+const INJECTION_PATTERNS: RegExp[] = [
+  /(忽略|无视|忘记|跳过|绕过).{0,8}(指令|规则|限制|设定|提示|要求|约束)/i,
+  /(系统|开发者|管理员).{0,6}(指令|提示词|设定|模式|权限)/i,
+  /(重复|输出|告诉我|展示|打印).{0,8}(你的|系统).{0,4}(设定|指令|提示|规则|要求)/i,
+  /(ignore|disregard|forget|override).{0,16}(previous|above|prior|system|instruction|prompt|rule)/i,
+  /(system|developer)\s*(prompt|message|instruction)/i,
+  /(jailbreak|dan\s*mode|prompt\s*injection|role\s*play)/i,
+  /(写|生成|编写|补全|输出).{0,8}(代码|脚本|程序|sql|正则)/i,
+  /(你是谁|你叫什么|你是什么|自我介绍|你能做什么|你会什么)/i,
+  /(who\s*are\s*you|what\s*can\s*you\s*do)/i,
+  /(<\s*script|javascript:|onerror\s*=|eval\s*\(|base64|https?:\/\/)/i
+]
+
+// 删除动作待确认状态（模块级，仅当前会话有效）。
+type PendingAction = {
+  kind: string // user | course | checkin
+  ids: number[]
+  label: string
+}
+
+let pendingAction: PendingAction | null = null
+
+// ------------------------------ 基础工具 ------------------------------
+
+export function emptyCard(): AgentCard {
+  const card: AgentCard = { title: '', subtitle: '', count: 0, items: [] }
+  return card
+}
+
+function textReply(content: string): AgentReply {
+  const reply: AgentReply = { type: 'text', content: content, data: emptyCard() }
+  return reply
+}
+
+function cardReply(content: string, card: AgentCard): AgentReply {
+  const reply: AgentReply = { type: 'card', content: content, data: card }
+  return reply
+}
+
+function errorReply(content: string): AgentReply {
+  const reply: AgentReply = { type: 'error', content: content, data: emptyCard() }
+  return reply
+}
+
+function hasWord(text: string, words: string[]): boolean {
+  for (let i = 0; i < words.length; i++) {
+    if (text.includes(words[i])) return true
+  }
+  return false
+}
+
+// 用空格替换掉指定 token（替代 split().join(' ')）。
+function removeToken(text: string, token: string): string {
+  const parts = text.split(token)
+  let output = ''
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) output += ' '
+    output += parts[i]
+  }
+  return output
+}
+
+function pad2(value: number): string {
+  return value < 10 ? '0' + value.toString() : value.toString()
+}
+
+function datePrefix(offset: number): string {
+  const date = new Date()
+  date.setDate(date.getDate() + offset)
+  return date.getFullYear().toString() + '-' + pad2(date.getMonth() + 1) + '-' + pad2(date.getDate())
+}
+
+// ------------------------------ 输入归一化与拦截 ------------------------------
+
+function normalizeInput(raw: string): string {
+  let converted = ''
+  for (let i = 0; i < raw.length; i++) {
+    const code = raw.charCodeAt(i)
+    // 零宽字符：直接丢弃，防止用零宽字符把敏感词拆开。
+    if (code == 0x200B || code == 0x200C || code == 0x200D || code == 0xFEFF) {
+      continue
+    }
+    if (code == 0x3000) {
+      converted += ' '
+    } else if (code >= 0xFF01 && code <= 0xFF5E) {
+      // 全角 ASCII 转半角，统一处理 "ｐｒｏｍｐｔ"。
+      converted += String.fromCharCode(code - 0xFEE0)
+    } else if (code == 0x0A || code == 0x0D || code == 0x09) {
+      converted += ' '
+    } else {
+      converted += raw.charAt(i)
+    }
+  }
+  converted = converted.replace(/\s+/g, ' ')
+  return converted.trim().toLowerCase()
+}
+
+// 只保留中文、字母、数字后再扫描一次，防止空格 / 标点 / 零宽字符拆字。
+function buildScanText(text: string): string {
+  return text.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '')
+}
+
+function hitBlacklist(text: string): boolean {
+  const scan = buildScanText(text)
+  for (let i = 0; i < BLACKLIST.length; i++) {
+    if (text.includes(BLACKLIST[i]) || scan.includes(BLACKLIST[i])) return true
+  }
+  for (let i = 0; i < INJECTION_PATTERNS.length; i++) {
+    if (INJECTION_PATTERNS[i].test(text) || INJECTION_PATTERNS[i].test(scan)) return true
+  }
+  return false
+}
+
+function isConfirm(text: string): boolean {
+  return text == '确认' || text == '确定' || text == '执行' || text == '确认删除'
+    || text == '确认执行' || text == 'yes' || text == 'ok' || text == '好的'
+}
+
+function isCancel(text: string): boolean {
+  return text == '取消' || text == '取消删除' || text == '算了' || text == '不删了'
+    || text == '放弃' || text == 'cancel' || text == 'no'
+}
+
+// ------------------------------ 关键词与实体识别 ------------------------------
+
+function extractKeyword(text: string): string {
+  let result = text.replace(/\d{4}-\d{1,2}-\d{1,2}/g, ' ')
+  for (let i = 0; i < NOISE_WORDS.length; i++) {
+    result = removeToken(result, NOISE_WORDS[i])
+  }
+  result = result.replace(/[，。！？、；：,.!?;:()（）【】\[\]<>《》]/g, ' ')
+  result = result.replace(/\s+/g, ' ').trim()
+  return result
+}
+
+function extractDeleteKeyword(text: string): string {
+  let result = text
+  for (let i = 0; i < DELETE_WORDS.length; i++) {
+    result = removeToken(result, DELETE_WORDS[i])
+  }
+  return extractKeyword(result)
+}
+
+function findMentionedUsers(text: string): User[] {
+  const found: User[] = []
+  for (let i = 0; i < users.length; i++) {
+    const user = users[i]
+    if (text.includes(user.name.toLowerCase()) || text.includes(user.studentNo.toLowerCase())) {
+      found.push(user)
+    }
+  }
+  return found
+}
+
+function findMentionedCourses(text: string): Course[] {
+  const found: Course[] = []
+  for (let i = 0; i < courses.length; i++) {
+    if (text.includes(courses[i].name.toLowerCase())) {
+      found.push(courses[i])
+    }
+  }
+  return found
+}
+
+function resolveRole(text: string): string {
+  if (text.includes('管理员')) return 'admin'
+  if (text.includes('老师') || text.includes('教师')) return 'teacher'
+  if (text.includes('学生')) return 'student'
+  return ''
+}
+
+function resolveResult(text: string): string {
+  if (text.includes('失败') || text.includes('未成功') || text.includes('异常')) return 'fail'
+  if (text.includes('成功')) return 'success'
+  return ''
+}
+
+function resolveDate(text: string): string {
+  if (text.includes('今天') || text.includes('今日')) return datePrefix(0)
+  if (text.includes('昨天')) return datePrefix(-1)
+  const pattern = new RegExp('\\d{4}-\\d{1,2}-\\d{1,2}')
+  const matched = pattern.exec(text)
+  if (matched != null) return matched[0]
+  return ''
+}
+
+function roleText(role: string): string {
+  if (role == 'student') return '学生'
+  if (role == 'teacher') return '教师'
+  if (role == 'admin') return '管理员'
+  return role
+}
+
+function roleBadgeType(role: string): string {
+  if (role == 'student') return 'info'
+  if (role == 'teacher') return 'success'
+  return 'warn'
+}
+
+function userLabel(list: User[]): string {
+  let label = ''
+  for (let i = 0; i < list.length; i++) {
+    if (i > 0) label += '、'
+    label += list[i].name
+  }
+  return label
+}
+
+function courseLabel(list: Course[]): string {
+  let label = ''
+  for (let i = 0; i < list.length; i++) {
+    if (i > 0) label += '、'
+    label += list[i].name
+  }
+  return label
+}
+
+// ------------------------------ 卡片构建 ------------------------------
+
+function buildUserCard(list: User[], label: string): AgentCard {
+  const items: AgentCardItem[] = []
+  for (let i = 0; i < list.length; i++) {
+    const user = list[i]
+    const phone = user.phone
+    const phoneText = phone == null ? '' : ' · ' + phone
+    const item: AgentCardItem = {
+      title: user.name,
+      subtitle: '学号 ' + user.studentNo + phoneText,
+      badge: roleText(user.role),
+      badgeType: roleBadgeType(user.role)
+    }
+    items.push(item)
+  }
+  let subtitle = '按角色整理 · 共 ' + items.length.toString() + ' 位'
+  if (label.length > 0) {
+    subtitle = '筛选「' + label + '」· ' + items.length.toString() + ' 位'
+  }
+  const card: AgentCard = {
+    title: '用户数据',
+    subtitle: subtitle,
+    count: items.length,
+    items: items
+  }
+  return card
+}
+
+function buildCourseCard(list: Course[], label: string): AgentCard {
+  const items: AgentCardItem[] = []
+  for (let i = 0; i < list.length; i++) {
+    const course = list[i]
+    const teacherName = course.teacherName
+    const teacher = teacherName == null ? '未指定教师' : teacherName
+    const item: AgentCardItem = {
+      title: course.name,
+      subtitle: teacher + ' · ' + course.startTime,
+      badge: 'ID ' + course.id.toString(),
+      badgeType: 'info'
+    }
+    items.push(item)
+  }
+  let subtitle = '按课程 ID 排列 · 共 ' + items.length.toString() + ' 门'
+  if (label.length > 0) {
+    subtitle = '筛选「' + label + '」· ' + items.length.toString() + ' 门'
+  }
+  const card: AgentCard = {
+    title: '课程数据',
+    subtitle: subtitle,
+    count: items.length,
+    items: items
+  }
+  return card
+}
+
+function buildCheckinCard(list: CheckinRecord[], label: string): AgentCard {
+  const items: AgentCardItem[] = []
+  for (let i = 0; i < list.length; i++) {
+    const record = list[i]
+    const item: AgentCardItem = {
+      title: record.userName + ' · ' + record.courseName,
+      subtitle: record.checkinTime + ' · ' + record.location,
+      badge: record.result == 'success' ? '成功' : '失败',
+      badgeType: record.result == 'success' ? 'success' : 'danger'
+    }
+    items.push(item)
+  }
+  let subtitle = '按签到时间倒序 · 共 ' + items.length.toString() + ' 条'
+  if (label.length > 0) {
+    subtitle = '筛选「' + label + '」· ' + items.length.toString() + ' 条'
+  }
+  const card: AgentCard = {
+    title: '签到记录',
+    subtitle: subtitle,
+    count: items.length,
+    items: items
+  }
+  return card
+}
+
+// ------------------------------ 统计回复 ------------------------------
+
+function statsUsersReply(list: User[]): AgentReply {
+  let students = 0
+  let teachers = 0
+  let admins = 0
+  for (let i = 0; i < list.length; i++) {
+    const role = list[i].role
+    if (role == 'student') students += 1
+    else if (role == 'teacher') teachers += 1
+    else admins += 1
+  }
+  const content = '用户总数：' + list.length.toString() + ' 位\n'
+    + '学生：' + students.toString() + ' 位\n'
+    + '教师：' + teachers.toString() + ' 位\n'
+    + '管理员：' + admins.toString() + ' 位'
+  return textReply(content)
+}
+
+function statsCoursesReply(list: Course[]): AgentReply {
+  const teachers: string[] = []
+  let latestStart = ''
+  for (let i = 0; i < list.length; i++) {
+    const teacherName = list[i].teacherName
+    if (teacherName != null && !teachers.includes(teacherName)) {
+      teachers.push(teacherName)
+    }
+    if (list[i].startTime > latestStart) latestStart = list[i].startTime
+  }
+  if (latestStart.length == 0) latestStart = '暂无'
+  const content = '课程总数：' + list.length.toString() + ' 门\n'
+    + '授课教师：' + teachers.length.toString() + ' 位\n'
+    + '最近开课：' + latestStart
+  return textReply(content)
+}
+
+function statsCheckinsReply(list: CheckinRecord[]): AgentReply {
+  let success = 0
+  let fail = 0
+  const userIds: number[] = []
+  for (let i = 0; i < list.length; i++) {
+    if (list[i].result == 'success') success += 1
+    else fail += 1
+    if (!userIds.includes(list[i].userId)) userIds.push(list[i].userId)
+  }
+  const rate = list.length == 0 ? 0 : Math.round(success * 100 / list.length)
+  let content = '签到统计（共 ' + list.length.toString() + ' 条）\n'
+    + '成功：' + success.toString() + ' 条 · 失败：' + fail.toString() + ' 条\n'
+    + '成功率：' + rate.toString() + '%\n'
+    + '参与用户：' + userIds.length.toString() + ' 人'
+  if (list.length > 0) {
+    content += '\n最近签到：' + list[0].checkinTime
+  }
+  return textReply(content)
+}
+
+// ------------------------------ 查询意图 ------------------------------
+
+function queryUsers(text: string, keyword: string, stats: boolean): AgentReply {
+  const mentioned = findMentionedUsers(text)
+  const role = resolveRole(text)
+  let list: User[] = []
+  for (let i = 0; i < users.length; i++) {
+    const user = users[i]
+    let keep = true
+    if (mentioned.length > 0) {
+      keep = false
+      for (let j = 0; j < mentioned.length; j++) {
+        if (mentioned[j].id === user.id) keep = true
+      }
+    } else if (keyword.length > 0) {
+      keep = user.name.toLowerCase().includes(keyword)
+        || user.studentNo.toLowerCase().includes(keyword)
+    }
+    // 角色词与点名同时存在时取交集，例如 "查学生张三"。
+    if (keep && role.length > 0) {
+      keep = user.role == role
+    }
+    if (keep) list.push(user)
+  }
+  list.sort((a: User, b: User): number => a.id - b.id)
+
+  if (stats) return statsUsersReply(list)
+
+  let label = keyword
+  if (mentioned.length > 0) label = userLabel(mentioned)
+  else if (role.length > 0) label = roleText(role)
+  const card = buildUserCard(list, label)
+  if (list.length == 0) {
+    if (label.length > 0) return cardReply('没有找到与「' + label + '」匹配的用户。', card)
+    return cardReply('当前用户表中暂无数据。', card)
+  }
+  return cardReply('共找到 ' + list.length.toString() + ' 位用户。', card)
+}
+
+function queryCourses(text: string, keyword: string, stats: boolean): AgentReply {
+  const mentioned = findMentionedCourses(text)
+  const mentionedUsers = findMentionedUsers(text)
+  let list: Course[] = []
+  for (let i = 0; i < courses.length; i++) {
+    const course = courses[i]
+    let keep = true
+    if (mentioned.length > 0) {
+      keep = false
+      for (let j = 0; j < mentioned.length; j++) {
+        if (mentioned[j].id === course.id) keep = true
+      }
+    } else if (mentionedUsers.length > 0) {
+      // "赵老师的课程"：按授课教师过滤。
+      keep = false
+      const teacherName = course.teacherName
+      if (teacherName != null) {
+        for (let j = 0; j < mentionedUsers.length; j++) {
+          if (teacherName.includes(mentionedUsers[j].name)) keep = true
+        }
+      }
+    } else if (keyword.length > 0) {
+      const teacherName = course.teacherName
+      const teacher = teacherName == null ? '' : teacherName.toLowerCase()
+      keep = course.name.toLowerCase().includes(keyword) || teacher.includes(keyword)
+    }
+    if (keep) list.push(course)
+  }
+  list.sort((a: Course, b: Course): number => a.id - b.id)
+
+  if (stats) return statsCoursesReply(list)
+
+  let label = keyword
+  if (mentioned.length > 0) label = courseLabel(mentioned)
+  else if (mentionedUsers.length > 0) label = userLabel(mentionedUsers) + ' 的课程'
+  const card = buildCourseCard(list, label)
+  if (list.length == 0) {
+    if (label.length > 0) return cardReply('没有找到与「' + label + '」匹配的课程。', card)
+    return cardReply('当前课程表中暂无数据。', card)
+  }
+  return cardReply('共找到 ' + list.length.toString() + ' 门课程。', card)
+}
+
+function queryCheckins(text: string, keyword: string, stats: boolean): AgentReply {
+  const mentionedUsers = findMentionedUsers(text)
+  const mentionedCourses = findMentionedCourses(text)
+  const result = resolveResult(text)
+  const date = resolveDate(text)
+  const latest = hasWord(text, LATEST_WORDS)
+  let list: CheckinRecord[] = []
+
+  for (let i = 0; i < checkinTable.length; i++) {
+    const record = checkinTable[i]
+    let keep = true
+    if (mentionedUsers.length > 0) {
+      keep = false
+      for (let j = 0; j < mentionedUsers.length; j++) {
+        if (mentionedUsers[j].id === record.userId) keep = true
+      }
+    }
+    if (keep && mentionedCourses.length > 0) {
+      let courseMatched = false
+      for (let j = 0; j < mentionedCourses.length; j++) {
+        if (mentionedCourses[j].id === record.courseId) courseMatched = true
+      }
+      keep = courseMatched
+    }
+    if (keep && mentionedUsers.length == 0 && mentionedCourses.length == 0 && keyword.length > 0) {
+      keep = record.userName.toLowerCase().includes(keyword)
+        || record.courseName.toLowerCase().includes(keyword)
+    }
+    if (keep && result.length > 0) {
+      keep = record.result == result
+    }
+    if (keep && date.length > 0) {
+      keep = record.checkinTime.startsWith(date)
+    }
+    if (keep) list.push(record)
+  }
+
+  list.sort((a: CheckinRecord, b: CheckinRecord): number => {
+    if (a.checkinTime < b.checkinTime) return 1
+    if (a.checkinTime > b.checkinTime) return -1
+    return b.id - a.id
+  })
+
+  if (stats) return statsCheckinsReply(list)
+
+  let label = keyword
+  if (mentionedUsers.length > 0) label = userLabel(mentionedUsers)
+  else if (mentionedCourses.length > 0) label = courseLabel(mentionedCourses)
+  if (date.length > 0) {
+    label = date
+  } else if (label.length == 0 && result.length > 0) {
+    label = result == 'success' ? '成功' : '失败'
+  }
+
+  // 聊天卡片最多展示 20 条；"最新" 只取 5 条，避免小屏过长。
+  const limit = latest ? 5 : 20
+  let shown = list
+  if (list.length > limit) shown = list.slice(0, limit)
+  const card = buildCheckinCard(shown, label)
+  if (list.length == 0) {
+    if (label.length > 0) return cardReply('没有找到与「' + label + '」匹配的签到记录。', card)
+    return cardReply('当前暂无签到记录。', card)
+  }
+  let content = '共找到 ' + list.length.toString() + ' 条签到记录。'
+  if (shown.length < list.length) {
+    content += '已为你展示最新 ' + shown.length.toString() + ' 条。'
+  }
+  return cardReply(content, card)
+}
+
+function handleQuery(text: string): AgentReply {
+  const keyword = extractKeyword(text)
+  const hasCheckin = hasWord(text, CHECKIN_WORDS)
+  const hasCourseWord = hasWord(text, COURSE_WORDS)
+  const hasUserWord = hasWord(text, USER_WORDS)
+  const hasRecord = text.includes('记录')
+  const isStats = hasWord(text, STAT_WORDS)
+  const mentionedCourses = findMentionedCourses(text)
+  const mentionedUsers = findMentionedUsers(text)
+
+  // 意图优先级：签到 > 课程 > 用户；"记录" 仅在无其他主语时归为签到。
+  if (hasCheckin || (hasRecord && !hasUserWord && !hasCourseWord)) {
+    return queryCheckins(text, keyword, isStats)
+  }
+  if (hasCourseWord || mentionedCourses.length > 0) {
+    return queryCourses(text, keyword, isStats)
+  }
+  if (hasUserWord || mentionedUsers.length > 0) {
+    return queryUsers(text, keyword, isStats)
+  }
+  return errorReply(REFUSAL_MESSAGE)
+}
+
+// ------------------------------ 删除意图（二次确认） ------------------------------
+
+function prepareDeleteUser(text: string): AgentReply {
+  const keyword = extractDeleteKeyword(text)
+  const mentioned = findMentionedUsers(text)
+  let targets: User[] = []
+  if (mentioned.length > 0) {
+    for (let i = 0; i < mentioned.length; i++) targets.push(mentioned[i])
+  } else if (keyword.length > 0) {
+    for (let i = 0; i < users.length; i++) {
+      const user = users[i]
+      if (user.name.toLowerCase().includes(keyword) || user.studentNo.toLowerCase().includes(keyword)) {
+        targets.push(user)
+      }
+    }
+  }
+
+  if (targets.length == 0) {
+    pendingAction = null
+    if (keyword.length == 0) return textReply('请告诉我要删除哪位用户，例如「删除用户张三」。')
+    return textReply('没有找到与「' + keyword + '」匹配的用户。')
+  }
+  if (targets.length > 1) {
+    pendingAction = null
+    return textReply('找到 ' + targets.length.toString() + ' 位匹配用户：' + userLabel(targets)
+      + '。请提供更精确的姓名或学号。')
+  }
+
+  const target = targets[0]
+  if (target.role == 'admin') {
+    pendingAction = null
+    return textReply('管理员账号受保护，不支持通过对话删除。')
+  }
+  const ids: number[] = [target.id]
+  const action: PendingAction = {
+    kind: 'user',
+    ids: ids,
+    label: target.name + ' / ' + target.studentNo
+  }
+  pendingAction = action
+  return textReply('即将删除用户「' + target.name + '」（学号 ' + target.studentNo + '）。\n'
+    + '删除后不可恢复，回复「确认」执行，回复「取消」放弃。')
+}
+
+function prepareDeleteCourse(text: string): AgentReply {
+  const keyword = extractDeleteKeyword(text)
+  const mentioned = findMentionedCourses(text)
+  const mentionedUsers = findMentionedUsers(text)
+  let targets: Course[] = []
+  if (mentioned.length > 0) {
+    for (let i = 0; i < mentioned.length; i++) targets.push(mentioned[i])
+  } else {
+    for (let i = 0; i < courses.length; i++) {
+      const course = courses[i]
+      let hit = false
+      if (keyword.length > 0 && course.name.toLowerCase().includes(keyword)) hit = true
+      const teacherName = course.teacherName
+      if (!hit && keyword.length > 0 && teacherName != null
+        && teacherName.toLowerCase().includes(keyword)) hit = true
+      if (!hit && mentionedUsers.length > 0 && teacherName != null) {
+        for (let j = 0; j < mentionedUsers.length; j++) {
+          if (teacherName.includes(mentionedUsers[j].name)) hit = true
+        }
+      }
+      if (hit) targets.push(course)
+    }
+  }
+
+  if (targets.length == 0) {
+    pendingAction = null
+    if (keyword.length == 0) return textReply('请告诉我要删除哪门课程，例如「删除课程数据结构」。')
+    return textReply('没有找到与「' + keyword + '」匹配的课程。')
+  }
+  if (targets.length > 1) {
+    pendingAction = null
+    return textReply('找到 ' + targets.length.toString() + ' 门匹配课程：' + courseLabel(targets)
+      + '。请提供更精确的课程名（暂不支持批量删除）。')
+  }
+
+  const target = targets[0]
+  if (target.id == 0 || (target.teacherName != null && target.teacherName == '系统')) {
+    pendingAction = null
+    return textReply('系统预置课程不可删除。')
+  }
+  const ids: number[] = [target.id]
+  const action: PendingAction = {
+    kind: 'course',
+    ids: ids,
+    label: target.name
+  }
+  pendingAction = action
+  return textReply('即将删除课程「' + target.name + '」。\n'
+    + '该课程的历史签到记录不会被联动删除。回复「确认」执行，回复「取消」放弃。')
+}
+
+function prepareDeleteCheckin(text: string): AgentReply {
+  const keyword = extractDeleteKeyword(text)
+  const mentionedUsers = findMentionedUsers(text)
+  const mentionedCourses = findMentionedCourses(text)
+  const result = resolveResult(text)
+  const date = resolveDate(text)
+  const hasFilter = mentionedUsers.length > 0 || mentionedCourses.length > 0
+    || keyword.length > 0 || result.length > 0 || date.length > 0
+
+  if (!hasFilter) {
+    pendingAction = null
+    return textReply('请指定要删除的签到记录，例如「删除张三的签到」。为避免误删，不支持一键清空。')
+  }
+
+  let targets: CheckinRecord[] = []
+  for (let i = 0; i < checkinTable.length; i++) {
+    const record = checkinTable[i]
+    let keep = true
+    if (mentionedUsers.length > 0) {
+      keep = false
+      for (let j = 0; j < mentionedUsers.length; j++) {
+        if (mentionedUsers[j].id === record.userId) keep = true
+      }
+    }
+    if (keep && mentionedCourses.length > 0) {
+      let courseMatched = false
+      for (let j = 0; j < mentionedCourses.length; j++) {
+        if (mentionedCourses[j].id === record.courseId) courseMatched = true
+      }
+      keep = courseMatched
+    }
+    if (keep && mentionedUsers.length == 0 && mentionedCourses.length == 0 && keyword.length > 0) {
+      keep = record.userName.toLowerCase().includes(keyword)
+        || record.courseName.toLowerCase().includes(keyword)
+    }
+    if (keep && result.length > 0) keep = record.result == result
+    if (keep && date.length > 0) keep = record.checkinTime.startsWith(date)
+    if (keep) targets.push(record)
+  }
+
+  if (targets.length == 0) {
+    pendingAction = null
+    return textReply('没有找到匹配的签到记录，未执行删除。')
+  }
+
+  const ids: number[] = []
+  let detail = ''
+  for (let i = 0; i < targets.length; i++) {
+    ids.push(targets[i].id)
+    if (i < 3) {
+      if (detail.length > 0) detail += '\n'
+      detail += '· ' + targets[i].userName + ' · ' + targets[i].courseName + ' · ' + targets[i].checkinTime
+    }
+  }
+  let label = ''
+  if (mentionedUsers.length > 0) label = userLabel(mentionedUsers)
+  else if (mentionedCourses.length > 0) label = courseLabel(mentionedCourses)
+  else label = keyword
+  const action: PendingAction = {
+    kind: 'checkin',
+    ids: ids,
+    label: label
+  }
+  pendingAction = action
+
+  return textReply('即将删除 ' + targets.length.toString() + ' 条签到记录：\n' + detail
+    + '\n删除后不可恢复，回复「确认」执行，回复「取消」放弃。')
+}
+
+function handleDelete(text: string): AgentReply {
+  if (hasWord(text, BATCH_WORDS)) {
+    pendingAction = null
+    return textReply('为避免误删，暂不支持一键清空或批量删除。请指定具体对象，例如「删除用户张三」。')
+  }
+
+  const isCheckin = hasWord(text, CHECKIN_WORDS) || text.includes('记录')
+  const isCourse = hasWord(text, COURSE_WORDS)
+  const isUser = hasWord(text, USER_WORDS)
+  let kind = ''
+  if (isCheckin) kind = 'checkin'
+  else if (isCourse) kind = 'course'
+  else if (isUser) kind = 'user'
+
+  if (kind.length == 0) {
+    if (findMentionedCourses(text).length > 0) kind = 'course'
+    else if (findMentionedUsers(text).length > 0) kind = 'user'
+  }
+
+  if (kind == 'checkin') return prepareDeleteCheckin(text)
+  if (kind == 'course') return prepareDeleteCourse(text)
+  if (kind == 'user') return prepareDeleteUser(text)
+
+  pendingAction = null
+  return textReply('请说明要删除的对象，例如「删除用户张三」「删除课程数据结构」「删除张三的签到记录」。')
+}
+
+function executePending(action: PendingAction | null): AgentReply {
+  pendingAction = null
+  if (action == null) return errorReply(REFUSAL_MESSAGE)
+
+  if (action.kind == 'user') {
+    let deleted = 0
+    for (let i = 0; i < action.ids.length; i++) {
+      const id = action.ids[i]
+      for (let j = users.length - 1; j >= 0; j--) {
+        if (users[j].id === id && users[j].role != 'admin') {
+          users.splice(j, 1)
+          deleted += 1
+          break
+        }
+      }
+    }
+    if (deleted == 0) return textReply('目标用户已不存在或受保护，操作已取消。')
+    return textReply('已删除 ' + deleted.toString() + ' 位用户（' + action.label + '）。\n'
+      + '相关签到记录不会联动删除，如需清理请单独删除签到记录。')
+  }
+
+  if (action.kind == 'course') {
+    let deleted = 0
+    for (let i = 0; i < action.ids.length; i++) {
+      const id = action.ids[i]
+      for (let j = courses.length - 1; j >= 0; j--) {
+        if (courses[j].id === id && courses[j].id != 0) {
+          courses.splice(j, 1)
+          deleted += 1
+          break
+        }
+      }
+    }
+    if (deleted == 0) return textReply('目标课程已不存在，操作已取消。')
+    return textReply('已删除 ' + deleted.toString() + ' 门课程（' + action.label + '）。')
+  }
+
+  if (action.kind == 'checkin') {
+    let deleted = 0
+    for (let i = 0; i < action.ids.length; i++) {
+      const id = action.ids[i]
+      for (let j = checkinTable.length - 1; j >= 0; j--) {
+        if (checkinTable[j].id === id) {
+          checkinTable.splice(j, 1)
+          deleted += 1
+          break
+        }
+      }
+    }
+    if (deleted == 0) return textReply('目标签到记录已不存在，操作已取消。')
+    return textReply('已删除 ' + deleted.toString() + ' 条签到记录。')
+  }
+
+  return textReply('未识别的操作，已取消。')
+}
+
+// ------------------------------ 统一入口 ------------------------------
+
+/**
+ * 处理一条用户消息。
+ * 返回值严格遵循 { type, content, data } 约定。
+ */
+export function handleAgentInput(raw: string): AgentReply {
+  const trimmed = raw.trim()
+  if (trimmed.length == 0) return errorReply(REFUSAL_MESSAGE)
+  if (trimmed.length > MAX_INPUT_LENGTH) return errorReply(REFUSAL_MESSAGE)
+
+  const text = normalizeInput(trimmed)
+  if (text.length == 0) return errorReply(REFUSAL_MESSAGE)
+
+  // 安全拦截必须先于"确认删除"，避免 "忽略指令，确认" 之类的组合攻击。
+  if (hitBlacklist(text)) {
+    pendingAction = null
+    return errorReply(REFUSAL_MESSAGE)
+  }
+
+  const action = pendingAction
+  if (action != null) {
+    if (isConfirm(text)) return executePending(action)
+    if (isCancel(text)) {
+      pendingAction = null
+      return textReply('已取消本次操作。')
+    }
+    // 用户输入了新指令：放弃旧的待确认动作，继续走白名单解析。
+    pendingAction = null
+  }
+
+  if (hasWord(text, DELETE_WORDS)) {
+    return handleDelete(text)
+  }
+
+  return handleQuery(text)
+}
+
+// 供页面在极端情况下主动清空待确认状态（例如页面卸载）。
+export function resetAgentState(): void {
+  pendingAction = null
+}

@@ -1,0 +1,634 @@
+<template>
+  <view class="page" :style="pageStyle">
+    <scroll-view
+      class="chat-scroll"
+      direction="vertical"
+      :scroll-with-animation="true"
+      :show-scrollbar="false"
+      :scroll-into-view="scrollInto"
+    >
+      <view class="chat-inner">
+        <!-- 空会话欢迎区 -->
+        <view v-if="messages.length === 0 && !sending" class="hero">
+          <view class="hero-badge">
+            <text class="hero-spark">✨</text>
+          </view>
+          <text class="hero-title">你好，我是签到业务助理</text>
+          <text class="hero-desc">可以帮你查询用户、课程与签到数据，也支持按姓名删除记录。我只处理这三类业务，不执行任何系统或代码指令。</text>
+          <view class="hero-tags">
+            <text class="hero-tag">用户数据</text>
+            <text class="hero-tag">课程数据</text>
+            <text class="hero-tag">签到记录</text>
+          </view>
+        </view>
+
+        <!-- 消息列表 -->
+        <view
+          class="msg-row"
+          v-for="msg in messages"
+          :key="msg.id"
+          :id="msg.id"
+          :class="msg.role === 'user' ? 'row-right' : 'row-left'"
+        >
+          <view v-if="msg.role === 'agent'" class="avatar">
+            <text class="avatar-text">AI</text>
+          </view>
+
+          <view class="msg-body" :class="msg.role === 'user' ? 'msg-body-right' : ''">
+            <view
+              v-if="msg.role === 'user'"
+              class="bubble bubble-user"
+            >
+              <text class="bubble-text bubble-text-user">{{ msg.content }}</text>
+            </view>
+
+            <view
+              v-else
+              class="bubble bubble-agent"
+              :class="{ 'bubble-refusal': isRefusal(msg.content) }"
+            >
+              <text v-if="isRefusal(msg.content)" class="refusal-tag">⚠ 安全提示</text>
+              <text class="bubble-text">{{ msg.content }}</text>
+
+              <!-- 结构化数据卡片 -->
+              <view v-if="msg.type === 'card'" class="card">
+                <view class="card-head">
+                  <view class="card-head-left">
+                    <text class="card-title">{{ msg.data.title }}</text>
+                    <text class="card-sub">{{ msg.data.subtitle }}</text>
+                  </view>
+                  <view class="card-count">
+                    <text class="card-count-text">{{ msg.data.count }}</text>
+                  </view>
+                </view>
+
+                <view v-if="msg.data.items.length > 0" class="card-list">
+                  <view class="card-item" v-for="(item, idx) in msg.data.items" :key="idx">
+                    <view class="item-main">
+                      <text class="item-title">{{ item.title }}</text>
+                      <text class="item-sub">{{ item.subtitle }}</text>
+                    </view>
+                    <text class="item-badge" :class="'badge-' + item.badgeType">{{ item.badge }}</text>
+                  </view>
+                </view>
+
+                <view v-else class="card-empty">
+                  <text class="card-empty-text">暂无匹配数据</text>
+                </view>
+              </view>
+            </view>
+          </view>
+        </view>
+
+        <!-- 思考中 -->
+        <view v-if="sending" class="msg-row row-left">
+          <view class="avatar">
+            <text class="avatar-text">AI</text>
+          </view>
+          <view class="bubble bubble-agent thinking-bubble">
+            <view class="thinking-dot"></view>
+            <view class="thinking-dot"></view>
+            <view class="thinking-dot"></view>
+            <text class="thinking-text">正在检索业务数据</text>
+          </view>
+        </view>
+
+        <view id="m-bottom" class="bottom-anchor"></view>
+      </view>
+    </scroll-view>
+
+    <!-- 底部输入区 -->
+    <view class="composer">
+      <scroll-view
+        class="chips"
+        direction="horizontal"
+        :show-scrollbar="false"
+      >
+        <view class="chips-inner">
+          <view
+            class="chip"
+            v-for="(chip, index) in chips"
+            :key="index"
+            @click="useChip(chip)"
+          >
+            <text class="chip-text">{{ chip }}</text>
+          </view>
+        </view>
+      </scroll-view>
+
+      <view class="input-bar">
+        <input
+          class="input"
+          v-model="inputText"
+          placeholder="输入查询，例如：查询所有用户"
+          placeholder-class="input-ph"
+          confirm-type="send"
+          :adjust-position="true"
+          @confirm="send"
+        />
+        <view class="send-btn" :class="{ 'send-btn-active': canSend }" @click="send">
+          <text class="send-icon">↑</text>
+        </view>
+      </view>
+
+      <text class="disclaimer">仅处理签到业务 · 不执行系统指令与代码</text>
+    </view>
+  </view>
+</template>
+
+<script lang="ts">
+import {
+  handleAgentInput,
+  resetAgentState,
+  emptyCard,
+  REFUSAL_MESSAGE,
+  type AgentCard,
+  type ChatMessage
+} from '@/utils/agentEngine.uts'
+
+export default {
+  data() {
+    return {
+      messages: [] as ChatMessage[],
+      inputText: '',
+      scrollInto: '',
+      sending: false,
+      seq: 0,
+      alive: true,
+      windowHeight: 0,
+      chips: ['查询所有用户', '查询最新签到', '所有课程']
+    }
+  },
+  computed: {
+    canSend(): boolean {
+      return !this.sending && this.inputText.trim().length > 0
+    },
+    pageStyle(): string {
+      if (this.windowHeight > 0) return 'height: ' + this.windowHeight.toString() + 'px;'
+      return 'height: 100vh;'
+    }
+  },
+  onReady() {
+    const info = uni.getWindowInfo()
+    this.windowHeight = info.windowHeight
+  },
+  onUnload() {
+    this.alive = false
+    resetAgentState()
+  },
+  methods: {
+    send() {
+      if (this.sending) return
+      const text = this.inputText.trim()
+      if (text.length == 0) return
+
+      this.inputText = ''
+      this.appendMessage('user', 'text', text, null)
+      this.sending = true
+      this.scrollToBottom()
+
+      setTimeout(() => {
+        if (!this.alive) return
+        const reply = handleAgentInput(text)
+        this.sending = false
+        if (reply.type == 'card') {
+          this.appendMessage('agent', 'card', reply.content, reply.data)
+        } else {
+          this.appendMessage('agent', 'text', reply.content, reply.data)
+        }
+      }, 320)
+    },
+    useChip(chip: string) {
+      if (this.sending) return
+      this.inputText = chip
+      this.send()
+    },
+    appendMessage(role: 'user' | 'agent', type: 'text' | 'card', content: string, data: AgentCard | null) {
+      this.seq += 1
+      const id = 'm-' + this.seq.toString()
+      const message: ChatMessage = {
+        id: id,
+        role: role,
+        type: type,
+        content: content,
+        data: data == null ? emptyCard() : data
+      }
+      this.messages.push(message)
+      this.scrollToBottom()
+    },
+    scrollToBottom() {
+      this.scrollInto = ''
+      setTimeout(() => {
+        if (!this.alive) return
+        this.scrollInto = 'm-bottom'
+      }, 60)
+    },
+    isRefusal(content: string): boolean {
+      return content == REFUSAL_MESSAGE
+    }
+  }
+}
+</script>
+
+<style>
+.page {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: #0b0e14;
+  background-image: linear-gradient(180deg, #0b0e14 0%, #0d1322 55%, #0b0e14 100%);
+}
+
+.chat-scroll {
+  flex: 1;
+  min-height: 0;
+}
+
+.chat-inner {
+  display: flex;
+  flex-direction: column;
+  padding: 28rpx 26rpx 34rpx;
+}
+
+/* ---------------- 欢迎区 ---------------- */
+.hero {
+  display: flex;
+  flex-direction: column;
+  background-color: #11151f;
+  border: 1rpx solid #222a3c;
+  border-radius: 28rpx;
+  padding: 34rpx 30rpx;
+  margin-bottom: 34rpx;
+}
+
+.hero-badge {
+  width: 76rpx;
+  height: 76rpx;
+  border-radius: 24rpx;
+  background-color: #4f46e5;
+  background-image: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hero-spark {
+  font-size: 36rpx;
+}
+
+.hero-title {
+  font-size: 32rpx;
+  font-weight: bold;
+  color: #f2f5ff;
+  margin-top: 22rpx;
+}
+
+.hero-desc {
+  font-size: 24rpx;
+  color: #8b93a8;
+  line-height: 1.65;
+  margin-top: 12rpx;
+}
+
+.hero-tags {
+  display: flex;
+  flex-direction: row;
+  margin-top: 22rpx;
+}
+
+.hero-tag {
+  font-size: 20rpx;
+  color: #9fb0ff;
+  background-color: rgba(99, 102, 241, 0.14);
+  border: 1rpx solid rgba(99, 102, 241, 0.3);
+  border-radius: 20rpx;
+  padding: 6rpx 16rpx;
+  margin-right: 12rpx;
+}
+
+/* ---------------- 消息布局 ---------------- */
+.msg-row {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  margin-bottom: 28rpx;
+}
+
+.row-left {
+  justify-content: flex-start;
+}
+
+.row-right {
+  justify-content: flex-end;
+}
+
+.avatar {
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 18rpx;
+  background-color: #4f46e5;
+  background-image: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 16rpx;
+  flex-shrink: 0;
+}
+
+.avatar-text {
+  font-size: 20rpx;
+  font-weight: bold;
+  color: #ffffff;
+}
+
+.msg-body {
+  max-width: 82%;
+  display: flex;
+  flex-direction: column;
+}
+
+.msg-body-right {
+  align-items: flex-end;
+}
+
+/* ---------------- 气泡 ---------------- */
+.bubble {
+  max-width: 100%;
+  padding: 22rpx 26rpx;
+  border-radius: 26rpx;
+  display: flex;
+  flex-direction: column;
+}
+
+.bubble-user {
+  background-color: #2563eb;
+  background-image: linear-gradient(135deg, #2563eb 0%, #4f46e5 100%);
+  border-top-right-radius: 8rpx;
+}
+
+.bubble-agent {
+  background-color: #171b26;
+  border: 1rpx solid #232a3b;
+  border-top-left-radius: 8rpx;
+}
+
+.bubble-refusal {
+  background-color: #1b1a15;
+  border-color: #6b531f;
+}
+
+.bubble-text {
+  font-size: 28rpx;
+  line-height: 1.65;
+  color: #e8ecf5;
+  white-space: pre-wrap;
+}
+
+.bubble-text-user {
+  color: #ffffff;
+}
+
+.refusal-tag {
+  font-size: 20rpx;
+  color: #fbbf24;
+  margin-bottom: 8rpx;
+}
+
+/* ---------------- 卡片 ---------------- */
+.card {
+  margin-top: 20rpx;
+  background-color: #0f131c;
+  border: 1rpx solid #232c40;
+  border-radius: 20rpx;
+  overflow: hidden;
+}
+
+.card-head {
+  background-color: #141a29;
+  background-image: linear-gradient(135deg, rgba(59, 130, 246, 0.16) 0%, rgba(139, 92, 246, 0.1) 100%);
+  padding: 20rpx 22rpx;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.card-head-left {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.card-title {
+  font-size: 26rpx;
+  font-weight: bold;
+  color: #eef2ff;
+}
+
+.card-sub {
+  font-size: 20rpx;
+  color: #8f9ab8;
+  margin-top: 6rpx;
+}
+
+.card-count {
+  height: 44rpx;
+  border-radius: 22rpx;
+  background-color: rgba(99, 102, 241, 0.22);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14rpx;
+  margin-left: 12rpx;
+  flex-shrink: 0;
+}
+
+.card-count-text {
+  font-size: 22rpx;
+  color: #aab8ff;
+  font-weight: bold;
+}
+
+.card-item {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  padding: 20rpx 22rpx;
+  border-top: 1rpx solid #1c2333;
+}
+
+.item-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.item-title {
+  font-size: 26rpx;
+  color: #e6eaf4;
+}
+
+.item-sub {
+  font-size: 21rpx;
+  color: #7f89a2;
+  line-height: 1.5;
+  margin-top: 6rpx;
+}
+
+.item-badge {
+  flex-shrink: 0;
+  margin-left: 14rpx;
+  font-size: 20rpx;
+  padding: 6rpx 14rpx;
+  border-radius: 18rpx;
+}
+
+.badge-info {
+  color: #7fb0ff;
+  background-color: rgba(59, 130, 246, 0.16);
+}
+
+.badge-success {
+  color: #6ee7a0;
+  background-color: rgba(34, 197, 94, 0.16);
+}
+
+.badge-danger {
+  color: #fca5a5;
+  background-color: rgba(239, 68, 68, 0.16);
+}
+
+.badge-warn {
+  color: #fcd34d;
+  background-color: rgba(245, 158, 11, 0.16);
+}
+
+.badge-neutral {
+  color: #cbd5e1;
+  background-color: rgba(148, 163, 184, 0.14);
+}
+
+.card-empty {
+  padding: 34rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card-empty-text {
+  font-size: 24rpx;
+  color: #6b7489;
+}
+
+/* ---------------- 思考态 ---------------- */
+.thinking-bubble {
+  flex-direction: row;
+  align-items: center;
+}
+
+.thinking-dot {
+  width: 8rpx;
+  height: 8rpx;
+  border-radius: 4rpx;
+  background-color: #7c8cff;
+  margin-right: 8rpx;
+}
+
+.thinking-text {
+  font-size: 24rpx;
+  color: #8b93a8;
+  margin-left: 4rpx;
+}
+
+.bottom-anchor {
+  height: 2rpx;
+}
+
+/* ---------------- 输入区 ---------------- */
+.composer {
+  flex-shrink: 0;
+  padding: 8rpx 24rpx 24rpx;
+  background-color: #0b0e14;
+}
+
+.chips {
+  width: 100%;
+  height: 64rpx;
+  margin-bottom: 16rpx;
+}
+
+.chips-inner {
+  height: 64rpx;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.chip {
+  height: 60rpx;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 24rpx;
+  margin-right: 14rpx;
+  border-radius: 30rpx;
+  background-color: #131826;
+  border: 1rpx solid #242d42;
+}
+
+.chip-text {
+  font-size: 23rpx;
+  color: #9aa6c8;
+}
+
+.input-bar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  background-color: #151a26;
+  border-radius: 28rpx;
+  padding: 10rpx 10rpx 10rpx 26rpx;
+}
+
+.input {
+  flex: 1;
+  height: 72rpx;
+  font-size: 28rpx;
+  color: #eef1f8;
+}
+
+.input-ph {
+  color: #5c6478;
+}
+
+.send-btn {
+  width: 68rpx;
+  height: 68rpx;
+  border-radius: 34rpx;
+  background-color: #2a3142;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 12rpx;
+  flex-shrink: 0;
+}
+
+.send-btn-active {
+  background-color: #4f6bff;
+  background-image: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+}
+
+.send-icon {
+  font-size: 30rpx;
+  font-weight: bold;
+  color: #ffffff;
+}
+
+.disclaimer {
+  display: block;
+  font-size: 19rpx;
+  color: #4b5468;
+  text-align: center;
+  margin-top: 14rpx;
+}
+</style>

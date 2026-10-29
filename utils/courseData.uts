@@ -1,0 +1,48 @@
+// utils/courseData.uts
+export type Course = {
+  id: number
+  name: string
+  latitude: number
+  longitude: number
+  startTime: string
+  signStart: string
+  signEnd: string
+  teacherName?: string // 新增：发布课程的老师名字
+}
+
+export const courses: Course[] = [
+  {
+    id: 0,
+    name: '测试课程',
+    latitude: 0,
+    longitude: 0,
+    startTime: '2000-01-01 00:00',
+    signStart: '2000-01-01 00:00',
+    signEnd: '2099-12-31 23:59',
+    teacherName: '系统',
+  },
+  {
+    id: 1,
+    name: '移动应用开发',
+    latitude: 34.2351,
+    longitude: 108.9153,
+    startTime: '2026-10-22 08:00',
+    signStart: '2026-10-22 07:50',
+    signEnd: '2026-10-22 08:20',
+    teacherName: '赵老师', // 归属赵老师
+  },
+  {
+    id: 2,
+    name: '数据结构',
+    latitude: 34.2351,
+    longitude: 108.9153,
+    startTime: '2026-10-22 10:00',
+    signStart: '2026-10-22 09:50',
+    signEnd: '2026-10-22 10:20',
+    teacherName: '赵老师', // 归属赵老师
+  },
+]
+
+export function getCourseById(id: number): Course | null {
+  return courses.find((c) => c.id === id) || null
+}

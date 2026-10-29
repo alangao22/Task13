@@ -1,0 +1,306 @@
+<template>
+  <view class="page">
+    <view class="top-bar">
+      <button class="top-btn add-btn" @click="openAdd">发布新课程</button>
+      <button class="top-btn edit-btn" :class="{ 'active-mode': mode === 'edit' }" @click="toggleMode('edit')">修改</button>
+      <button class="top-btn del-btn" :class="{ 'active-mode': mode === 'delete' }" @click="toggleMode('delete')">删除</button>
+    </view>
+
+    <view v-if="mode !== 'normal'" class="hint-bar">
+      请点击下方课程选择{{ mode === 'edit' ? '修改' : '删除' }}
+      <text class="cancel-text" @click="toggleMode('normal')">取消</text>
+    </view>
+
+    <view class="list">
+      <view class="course-card" v-for="(course, index) in myCourses" :key="course.id" @click="onItemClick(course, index)">
+        <view class="c-head">
+          <text class="name">{{ course.name }}</text>
+        </view>
+        <text class="c-info">开课：{{ course.startTime }}</text>
+        <text class="c-info">可签：{{ course.signStart }} 至 {{ course.signEnd }}</text>
+        <text class="c-info">坐标：{{ course.latitude }}, {{ course.longitude }}</text>
+      </view>
+      <view v-if="myCourses.length === 0" class="empty">您还没有发布过课程</view>
+    </view>
+
+    <!-- 弹窗 -->
+    <view class="modal-mask" v-if="showModal">
+      <view class="modal">
+        <view class="modal-title">{{ isEdit ? '修改课程' : '发布新课程' }}</view>
+
+        <input class="modal-input" v-model="form.name" placeholder="课程名称" />
+
+        <!-- 开课时间 -->
+        <view class="time-label">开课时间</view>
+        <view class="time-row">
+          <picker mode="date" :value="form.startDate" @change="e => form.startDate = e.detail.value" class="time-picker">
+            <view class="picker-box">{{ form.startDate }}</view>
+          </picker>
+          <input class="modal-input time-input" type="number" v-model="form.startHour" placeholder="时" maxlength="2" />
+          <text class="colon">:</text>
+          <input class="modal-input time-input" type="number" v-model="form.startMin" placeholder="分" maxlength="2" />
+        </view>
+
+        <!-- 签到开始时间 -->
+        <view class="time-label">签到开始时间</view>
+        <view class="time-row">
+          <picker mode="date" :value="form.signStartDate" @change="e => form.signStartDate = e.detail.value" class="time-picker">
+            <view class="picker-box">{{ form.signStartDate }}</view>
+          </picker>
+          <input class="modal-input time-input" type="number" v-model="form.signStartHour" placeholder="时" maxlength="2" />
+          <text class="colon">:</text>
+          <input class="modal-input time-input" type="number" v-model="form.signStartMin" placeholder="分" maxlength="2" />
+        </view>
+
+        <!-- 签到结束时间 -->
+        <view class="time-label">签到结束时间</view>
+        <view class="time-row">
+          <picker mode="date" :value="form.signEndDate" @change="e => form.signEndDate = e.detail.value" class="time-picker">
+            <view class="picker-box">{{ form.signEndDate }}</view>
+          </picker>
+          <input class="modal-input time-input" type="number" v-model="form.signEndHour" placeholder="时" maxlength="2" />
+          <text class="colon">:</text>
+          <input class="modal-input time-input" type="number" v-model="form.signEndMin" placeholder="分" maxlength="2" />
+        </view>
+
+        <!-- 坐标 -->
+        <view class="time-label">签到坐标 (可直接手动输入修改)</view>
+        <view class="loc-row">
+          <input class="modal-input loc-input" v-model="form.latitude" placeholder="纬度" type="digit" />
+          <input class="modal-input loc-input" v-model="form.longitude" placeholder="经度" type="digit" />
+          <button class="loc-btn" @click="getLocation">自动获取</button>
+        </view>
+
+        <view class="modal-actions">
+          <button class="cancel-btn" @click="showModal = false">取消</button>
+          <button class="save-btn" @click="saveCourse">保存</button>
+        </view>
+      </view>
+    </view>
+  </view>
+</template>
+
+<script lang="ts">
+import { courses } from '@/utils/courseData.uts'
+
+// 获取今天的日期字符串 (YYYY-MM-DD)
+const today = new Date();
+const defaultDate = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+export default {
+  data() {
+    return {
+      teacherName: '',
+      allCourses: courses,
+      mode: 'normal',
+      showModal: false,
+      isEdit: false,
+      editIndex: -1,
+      form: {
+        name: '',
+        startDate: defaultDate, startHour: '08', startMin: '00',
+        signStartDate: defaultDate, signStartHour: '07', signStartMin: '50',
+        signEndDate: defaultDate, signEndHour: '08', signEndMin: '20',
+        latitude: '', longitude: ''
+      }
+    }
+  },
+  computed: {
+    myCourses(): any[] {
+      return this.allCourses.filter(c => c.teacherName === this.teacherName)
+    }
+  },
+  onLoad(options: any) {
+    if (options && options.teacherName) {
+      this.teacherName = decodeURIComponent(String(options.teacherName))
+    }
+  },
+  methods: {
+    toggleMode(m: string) {
+      this.mode = this.mode === m ? 'normal' : m;
+    },
+    openAdd() {
+      this.isEdit = false;
+      this.form = {
+        name: '',
+        startDate: defaultDate, startHour: '08', startMin: '00',
+        signStartDate: defaultDate, signStartHour: '07', signStartMin: '50',
+        signEndDate: defaultDate, signEndHour: '08', signEndMin: '20',
+        latitude: '', longitude: ''
+      };
+      this.mode = 'normal';
+      this.showModal = true;
+    },
+    onItemClick(course: any, index: number) {
+      if (this.mode === 'edit') {
+        this.isEdit = true;
+        this.editIndex = this.allCourses.findIndex(c => c.id === course.id);
+
+        const splitTime = (str: string) => {
+          const parts = str.split(' ');
+          const date = parts[0] || defaultDate;
+          const time = parts[1] ? parts[1].split(':') : ['00', '00'];
+          return { date, hour: time[0], min: time[1] };
+        };
+
+        const start = splitTime(course.startTime);
+        const sStart = splitTime(course.signStart);
+        const sEnd = splitTime(course.signEnd);
+
+        this.form = {
+          name: course.name,
+          startDate: start.date, startHour: start.hour, startMin: start.min,
+          signStartDate: sStart.date, signStartHour: sStart.hour, signStartMin: sStart.min,
+          signEndDate: sEnd.date, signEndHour: sEnd.hour, signEndMin: sEnd.min,
+          latitude: String(course.latitude), longitude: String(course.longitude)
+        };
+        this.showModal = true;
+      } else if (this.mode === 'delete') {
+        uni.showModal({
+          title: '确认删除',
+          content: `确定要删除课程【${course.name}】吗？`,
+          success: (res) => {
+            if (res.confirm) {
+              const realIndex = this.allCourses.findIndex(c => c.id === course.id);
+              this.allCourses.splice(realIndex, 1);
+              this.allCourses = [...courses];
+              this.mode = 'normal';
+              uni.showToast({ title: '已删除', icon: 'success' });
+            }
+          }
+        });
+      }
+    },
+    getLocation() {
+      uni.showLoading({ title: '获取中...' });
+      if (typeof navigator !== 'undefined' && navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            this.form.latitude = position.coords.latitude.toFixed(6);
+            this.form.longitude = position.coords.longitude.toFixed(6);
+            uni.hideLoading();
+            const accuracy = position.coords.accuracy ? Math.round(position.coords.accuracy) : '未知';
+            uni.showToast({ title: `获取成功（误差约${accuracy}米）`, icon: 'none' });
+          },
+          (error) => {
+            uni.hideLoading();
+            uni.showToast({ title: '定位失败，请手动输入', icon: 'none' });
+          },
+          { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        );
+      } else {
+        uni.hideLoading();
+        uni.showToast({ title: '当前环境不支持', icon: 'none' });
+      }
+    },
+    saveCourse() {
+      if (!this.form.name) {
+        uni.showToast({ title: '请填写课程名称', icon: 'none' });
+        return;
+      }
+
+      const pad = (n: string) => String(n).padStart(2, '0');
+
+      // 拼装成完整的时间字符串
+      const startTimeStr = `${this.form.startDate} ${pad(this.form.startHour || '00')}:${pad(this.form.startMin || '00')}`;
+      const signStartStr = `${this.form.signStartDate} ${pad(this.form.signStartHour || '00')}:${pad(this.form.signStartMin || '00')}`;
+      const signEndStr = `${this.form.signEndDate} ${pad(this.form.signEndHour || '00')}:${pad(this.form.signEndMin || '00')}`;
+
+      // 转换为时间戳
+      const startTs = new Date(startTimeStr.replace(/-/g, '/')).getTime();
+      const signStartTs = new Date(signStartStr.replace(/-/g, '/')).getTime();
+      const signEndTs = new Date(signEndStr.replace(/-/g, '/')).getTime();
+
+      // ===== 像登录一样的简单直白拦截 =====
+
+      // 1. 签到开始必须早于签到结束
+      if (signStartTs >= signEndTs) {
+        uni.showToast({ title: '签到开始时间必须早于结束时间', icon: 'none' });
+        return; // 终止保存
+      }
+
+      // 2. 开课时间必须晚于签到开始（或相等）
+      if (startTs < signStartTs) {
+        uni.showToast({ title: '开课时间不能早于签到开始', icon: 'none' });
+        return; // 终止保存
+      }
+
+      // 3. 开课时间必须早于签到结束（或相等）
+      if (startTs > signEndTs) {
+        uni.showToast({ title: '开课时间不能晚于签到结束', icon: 'none' });
+        return; // 终止保存
+      }
+
+      // 处理经纬度 6 位小数
+      const lat = Number(this.form.latitude);
+      const lng = Number(this.form.longitude);
+      const finalLat = isNaN(lat) ? 0 : Number(lat.toFixed(6));
+      const finalLng = isNaN(lng) ? 0 : Number(lng.toFixed(6));
+
+      const dataToSave = {
+        name: this.form.name,
+        startTime: startTimeStr,
+        signStart: signStartStr,
+        signEnd: signEndStr,
+        latitude: finalLat,
+        longitude: finalLng
+      };
+
+      if (this.isEdit && this.editIndex >= 0) {
+        this.allCourses.splice(this.editIndex, 1, {
+          ...dataToSave,
+          id: this.allCourses[this.editIndex].id,
+          teacherName: this.teacherName
+        });
+      } else {
+        this.allCourses.push({
+          ...dataToSave,
+          id: Date.now(),
+          teacherName: this.teacherName
+        });
+      }
+
+      this.allCourses = [...courses];
+      this.showModal = false;
+      this.mode = 'normal';
+      uni.showToast({ title: '操作成功', icon: 'success' });
+    }
+  }
+}
+</script>
+
+<style>
+/* 样式与之前完全一致 */
+.page { min-height: 100vh; background-color: #f5f6fa; padding: 20rpx 30rpx; box-sizing: border-box; }
+.top-bar { display: flex; flex-direction: row; justify-content: space-between; margin-bottom: 20rpx; width: 100%; }
+.top-btn { flex: 1; height: 70rpx; line-height: 70rpx; font-size: 26rpx; border-radius: 12rpx; margin: 0 10rpx; color: #fff; padding: 0; }
+.top-btn:first-child { margin-left: 0; }
+.top-btn:last-child { margin-right: 0; }
+.add-btn { background-color: #4cd964; }
+.edit-btn { background-color: #ff9500; }
+.del-btn { background-color: #ff3b30; }
+.active-mode { opacity: 0.6; border: 4rpx solid #333; }
+.hint-bar { background-color: #fff4e6; color: #ff9500; padding: 20rpx; text-align: center; font-size: 26rpx; border-radius: 12rpx; margin-bottom: 20rpx; }
+.cancel-text { color: #007aff; margin-left: 20rpx; text-decoration: underline; }
+.course-card { background-color: #fff; border-radius: 20rpx; padding: 30rpx; margin-bottom: 24rpx; }
+.c-head { margin-bottom: 10rpx; }
+.name { font-size: 34rpx; font-weight: bold; color: #333; }
+.c-info { font-size: 26rpx; color: #666; display: block; margin-top: 6rpx; }
+.empty { text-align: center; color: #999; font-size: 28rpx; padding: 40rpx 0; }
+.modal-mask { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 999; }
+.modal { background-color: #fff; width: 680rpx; border-radius: 20rpx; padding: 40rpx; box-sizing: border-box; max-height: 90vh; overflow-y: auto; }
+.modal-title { font-size: 36rpx; font-weight: bold; text-align: center; margin-bottom: 30rpx; }
+.modal-input { width: 100%; height: 80rpx; border: 1rpx solid #ddd; margin-bottom: 20rpx; padding: 0 20rpx; box-sizing: border-box; border-radius: 8rpx; font-size: 28rpx; }
+.time-label { font-size: 26rpx; color: #666; margin-bottom: 10rpx; }
+.time-row { display: flex; flex-direction: row; align-items: center; margin-bottom: 20rpx; }
+.time-picker { flex: 1; margin-right: 10rpx; }
+.picker-box { height: 80rpx; border: 1rpx solid #ddd; border-radius: 8rpx; line-height: 80rpx; padding: 0 20rpx; font-size: 28rpx; background-color: #fafafa; }
+.time-input { width: 80rpx; margin-bottom: 0; text-align: center; padding: 0; margin-right: 10rpx; }
+.colon { font-size: 32rpx; font-weight: bold; margin-right: 10rpx; color: #333; }
+.loc-row { display: flex; flex-direction: row; align-items: center; margin-bottom: 20rpx; }
+.loc-input { flex: 1; margin-bottom: 0; margin-right: 10rpx; }
+.loc-btn { width: 140rpx; height: 80rpx; line-height: 80rpx; font-size: 26rpx; background-color: #007aff; color: #fff; border-radius: 8rpx; padding: 0; margin: 0; }
+.modal-actions { display: flex; justify-content: space-between; margin-top: 40rpx; }
+.cancel-btn { width: 45%; background-color: #f0f0f0; color: #555; height: 70rpx; line-height: 70rpx; font-size: 28rpx; }
+.save-btn { width: 45%; background-color: #4cd964; color: #fff; height: 70rpx; line-height: 70rpx; font-size: 28rpx; }
+</style>
