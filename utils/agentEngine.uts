@@ -114,6 +114,15 @@ const INJECTION_PATTERNS: RegExp[] = [
   /(<\s*script|javascript:|onerror\s*=|eval\s*\(|base64|https?:\/\/)/i
 ]
 
+// 拼图式时间槽位：每个字段独立记录，支持多轮增量补全。
+export type TimeSlots = {
+  year: string
+  month: string
+  day: string
+  hour: string
+  minute: string
+}
+
 // 通用写操作待处理状态：槽位填充 + 二次确认。
 type PendingOperation = {
   intent: string // add_user | add_course | update_user | update_course | delete_user | delete_course | delete_checkin
@@ -130,6 +139,7 @@ type PendingOperation = {
   ids: number[]
   label: string
   minutePending: boolean
+  timeSlots: TimeSlots
 }
 
 let sessionState: string = 'idle' // idle | awaiting_slots | awaiting_confirm
@@ -769,7 +779,8 @@ function createOperation(intent: string): PendingOperation {
     newValue: '',
     ids: [],
     label: '',
-    minutePending: false
+    minutePending: false,
+    timeSlots: { year: '', month: '', day: '', hour: '', minute: '' }
   }
   return op
 }
@@ -839,6 +850,285 @@ function parseMinute(text: string): number {
   return value
 }
 
+// ------------------------------ 时间槽位：增量提取与合并 ------------------------------
+
+function emptyTimeSlots(): TimeSlots {
+  const slots: TimeSlots = {
+    year: '',
+    month: '',
+    day: '',
+    hour: '',
+    minute: ''
+  }
+  return slots
+}
+
+function copyTimeSlots(source: TimeSlots): TimeSlots {
+  const slots: TimeSlots = {
+    year: source.year,
+    month: source.month,
+    day: source.day,
+    hour: source.hour,
+    minute: source.minute
+  }
+  return slots
+}
+
+function mergeTimeSlots(base: TimeSlots, incoming: TimeSlots): TimeSlots {
+  const result = copyTimeSlots(base)
+  if (incoming.year.length > 0) result.year = incoming.year
+  if (incoming.month.length > 0) result.month = incoming.month
+  if (incoming.day.length > 0) result.day = incoming.day
+  if (incoming.hour.length > 0) result.hour = incoming.hour
+  if (incoming.minute.length > 0) result.minute = incoming.minute
+  return result
+}
+
+function hasAnyTimeSlot(slots: TimeSlots): boolean {
+  return slots.year.length > 0 || slots.month.length > 0 || slots.day.length > 0
+    || slots.hour.length > 0 || slots.minute.length > 0
+}
+
+function convertHour(period: string, hour: number): number {
+  if (period == '下午' || period == '晚上') {
+    if (hour < 12) return hour + 12
+  }
+  if (period == '中午') {
+    if (hour < 12) return hour + 12
+  }
+  return hour
+}
+
+// 支持：2026年11月2号下午4点整 / 11月2号 / 下午4点 / 4点半 / 16:00 / 30分 / 整。
+function extractTimeSlots(text: string): TimeSlots {
+  const result = emptyTimeSlots()
+
+  let matched = new RegExp('(\\d{4})-(\\d{1,2})-(\\d{1,2})').exec(text)
+  if (matched != null) {
+    const month = toInt(matched[2])
+    const day = toInt(matched[3])
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      result.year = matched[1]
+      result.month = pad2(month)
+      result.day = pad2(day)
+    }
+  }
+  if (result.year.length == 0) {
+    matched = new RegExp('(\\d{4})\\s*年').exec(text)
+    if (matched != null) result.year = matched[1]
+  }
+  if (result.month.length == 0) {
+    matched = new RegExp('(\\d{1,2})\\s*月').exec(text)
+    if (matched != null) {
+      const month = toInt(matched[1])
+      if (month >= 1 && month <= 12) result.month = pad2(month)
+    }
+  }
+  if (result.day.length == 0) {
+    matched = new RegExp('(\\d{1,2})\\s*[日号]').exec(text)
+    if (matched != null) {
+      const day = toInt(matched[1])
+      if (day >= 1 && day <= 31) result.day = pad2(day)
+    }
+  }
+
+  let hour = ''
+  let minute = ''
+
+  matched = new RegExp('(上午|下午|晚上|中午|凌晨)\\s*(\\d{1,2})\\s*[:：]\\s*(\\d{1,2})').exec(text)
+  if (matched != null) {
+    hour = convertHour(matched[1], toInt(matched[2])).toString()
+    minute = matched[3]
+  } else {
+    matched = new RegExp('(\\d{1,2})\\s*[:：]\\s*(\\d{1,2})').exec(text)
+    if (matched != null) {
+      hour = matched[1]
+      minute = matched[2]
+    }
+  }
+
+  if (hour.length == 0) {
+    matched = new RegExp('(上午|下午|晚上|中午|凌晨)\\s*(\\d{1,2})\\s*[点时]').exec(text)
+    if (matched != null) {
+      hour = convertHour(matched[1], toInt(matched[2])).toString()
+    }
+  }
+  if (hour.length == 0) {
+    matched = new RegExp('(\\d{1,2})\\s*[点时]').exec(text)
+    if (matched != null) hour = matched[1]
+  }
+
+  if (minute.length == 0) {
+    matched = new RegExp('(\\d{1,2})\\s*分').exec(text)
+    if (matched != null) minute = matched[1]
+  }
+  if (minute.length == 0) {
+    matched = new RegExp('[点时]\\s*(\\d{1,2})').exec(text)
+    if (matched != null) minute = matched[1]
+  }
+  if (minute.length == 0) {
+    const trimmed = text.trim()
+    if (trimmed == '半' || new RegExp('[点时]\\s*半').test(text)) {
+      minute = '30'
+    } else if (trimmed == '整' || new RegExp('[点时]\\s*整').test(text)) {
+      minute = '00'
+    }
+  }
+
+  if (hour.length > 0) {
+    const hourValue = toInt(hour)
+    if (hourValue >= 0 && hourValue <= 23) result.hour = pad2(hourValue)
+  }
+  if (minute.length > 0) {
+    const minuteValue = toInt(minute)
+    if (minuteValue >= 0 && minuteValue <= 59) result.minute = pad2(minuteValue)
+  }
+  return result
+}
+
+// 对外暴露的 TimeSkill：允许返回空字段，由调用方增量合并。
+export function extractTimeSkill(text: string): TimeSlots {
+  return extractTimeSlots(text)
+}
+
+function todayDateParts(): TimeSlots {
+  const now = new Date()
+  const result: TimeSlots = {
+    year: now.getFullYear().toString(),
+    month: pad2(now.getMonth() + 1),
+    day: pad2(now.getDate()),
+    hour: '',
+    minute: ''
+  }
+  return result
+}
+
+function courseDateParts(course: Course): TimeSlots {
+  const result = emptyTimeSlots()
+  const matched = new RegExp('(\\d{4})-(\\d{1,2})-(\\d{1,2})').exec(course.startTime)
+  if (matched != null) {
+    result.year = matched[1]
+    result.month = pad2(toInt(matched[2]))
+    result.day = pad2(toInt(matched[3]))
+  } else {
+    const now = new Date()
+    result.year = now.getFullYear().toString()
+    result.month = pad2(now.getMonth() + 1)
+    result.day = pad2(now.getDate())
+  }
+  return result
+}
+
+function isValidDate(year: number, month: number, day: number): boolean {
+  if (year < 1900 || year > 2100) return false
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false
+  const date = new Date(year.toString() + '/' + month.toString() + '/' + day.toString())
+  return date.getFullYear() == year && date.getMonth() + 1 == month && date.getDate() == day
+}
+
+function resolveTimeSlots(slots: TimeSlots, base: TimeSlots): TimeSlots | null {
+  let year = slots.year
+  let month = slots.month
+  let day = slots.day
+  const hasDateInput = year.length > 0 || month.length > 0 || day.length > 0
+
+  if (hasDateInput) {
+    if (year.length == 0) year = new Date().getFullYear().toString()
+    if (month.length == 0) month = base.month
+    if (day.length == 0) {
+      if (slots.month.length > 0) return null
+      day = base.day
+    }
+  } else {
+    year = base.year
+    month = base.month
+    day = base.day
+  }
+
+  if (slots.hour.length == 0 || slots.minute.length == 0) return null
+
+  const yearValue = toInt(year)
+  const monthValue = toInt(month)
+  const dayValue = toInt(day)
+  const hourValue = toInt(slots.hour)
+  const minuteValue = toInt(slots.minute)
+  if (!isValidDate(yearValue, monthValue, dayValue)) return null
+  if (hourValue < 0 || hourValue > 23 || minuteValue < 0 || minuteValue > 59) return null
+
+  const result: TimeSlots = {
+    year: yearValue.toString(),
+    month: pad2(monthValue),
+    day: pad2(dayValue),
+    hour: pad2(hourValue),
+    minute: pad2(minuteValue)
+  }
+  return result
+}
+
+function formatTimeSlots(slots: TimeSlots): string {
+  return slots.year + '-' + slots.month + '-' + slots.day + ' ' + slots.hour + ':' + slots.minute
+}
+
+function describeHour(hour: string): string {
+  const value = toInt(hour)
+  if (value == 0) return '0点'
+  if (value < 12) return '上午' + value.toString() + '点'
+  if (value == 12) return '中午12点'
+  return '下午' + (value - 12).toString() + '点'
+}
+
+function describeDateSlots(slots: TimeSlots): string {
+  let result = ''
+  if (slots.month.length > 0) result += toInt(slots.month).toString() + '月'
+  if (slots.day.length > 0) result += toInt(slots.day).toString() + '日'
+  if (result.length == 0 && slots.year.length > 0) result = slots.year + '年'
+  return result
+}
+
+function isDateInputInvalid(slots: TimeSlots): boolean {
+  if (slots.month.length == 0 || slots.day.length == 0) return false
+  let year = new Date().getFullYear()
+  if (slots.year.length > 0) year = toInt(slots.year)
+  return !isValidDate(year, toInt(slots.month), toInt(slots.day))
+}
+
+function buildTimePrompt(slots: TimeSlots): string {
+  if (slots.hour.length > 0 && slots.minute.length == 0) {
+    return '已记录为' + describeHour(slots.hour) + '，请问分钟数是多少？'
+  }
+  if (slots.hour.length == 0 && slots.minute.length > 0) {
+    return '已记录分钟为【' + slots.minute + '】，请问具体是几时？'
+  }
+  if (slots.month.length > 0 && slots.day.length == 0) {
+    return '已记录月份为【' + toInt(slots.month).toString() + '月】，请问具体日期（几号）？'
+  }
+  if ((slots.month.length > 0 || slots.day.length > 0) && slots.hour.length == 0) {
+    return '已记录日期为【' + describeDateSlots(slots) + '】，请问具体时间（时和分）是多少？'
+  }
+  if (slots.month.length == 0 && slots.day.length == 0 && slots.year.length > 0 && slots.hour.length == 0) {
+    return '已记录年份为【' + slots.year + '年】，请问具体日期和时间。'
+  }
+  return '请告诉我月份、日期或具体的几时几分。'
+}
+
+function missingTimeSlots(slots: TimeSlots): string[] {
+  const missing: string[] = []
+  if (slots.month.length == 0) missing.push('月份')
+  if (slots.day.length == 0) missing.push('日期')
+  if (slots.hour.length == 0) missing.push('小时')
+  if (slots.minute.length == 0) missing.push('分钟')
+  return missing
+}
+
+function joinWithAnd(parts: string[]): string {
+  let result = ''
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) result += '和'
+    result += parts[i]
+  }
+  return result
+}
+
 function parseUserRole(text: string): string {
   if (text.includes('管理员') || text.includes('admin')) return 'admin'
   if (text.includes('老师') || text.includes('教师') || text.includes('teacher')) return 'teacher'
@@ -853,9 +1143,23 @@ function toUserRole(role: string): 'student' | 'teacher' | 'admin' {
 }
 
 function parseStudentNo(text: string): string {
-  let matched = new RegExp('(?:学号|编号|studentno)\\s*(?:改为|改成|设置为|为|是|:|：)?\\s*([a-zA-Z0-9]+)', 'i').exec(text)
-  if (matched != null) return matched[1]
+  let matched = new RegExp('(?:学号|工号|编号|studentno)\\s*(?:改为|改成|设置为|为|是|:|：)?\\s*([a-zA-Z0-9]+)', 'i').exec(text)
+  if (matched != null) return matched[1].toUpperCase()
   matched = new RegExp('([a-zA-Z0-9]{3,})').exec(text)
+  if (matched != null) return matched[1].toUpperCase()
+  return ''
+}
+
+function parseNameOverride(text: string): string {
+  const matched = new RegExp('(?:姓名|名字)\\s*(?:改成|改为|设置为|是|叫|为|[:：])?\\s*([^\\s，。,.!?；;：:]+)').exec(text)
+  if (matched != null) return matched[1]
+  return ''
+}
+
+function parseCourseNameOverride(text: string): string {
+  let matched = new RegExp('(?:课程名称|课程名)\\s*(?:改成|改为|设置为|是|叫|为|[:：])?\\s*([^\\s，。,.!?；;：:]+)').exec(text)
+  if (matched != null) return matched[1]
+  matched = new RegExp('课程\\s*(?:改成|改为|设置为|是|叫|为|[:：])\\s*([^\\s，。,.!?；;：:]+)').exec(text)
   if (matched != null) return matched[1]
   return ''
 }
@@ -891,9 +1195,15 @@ function cleanCourseName(text: string): string {
   let result = firstClause(text)
   result = result.replace(/\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{1,2}/g, ' ')
   result = result.replace(/\d{4}-\d{1,2}-\d{1,2}\s+\d{1,2}点\d{1,2}分?/g, ' ')
+  result = result.replace(/\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]/g, ' ')
+  result = result.replace(/\d{1,2}\s*月\s*\d{1,2}\s*[日号]/g, ' ')
+  result = result.replace(/(?:上午|下午|晚上|中午|凌晨)?\s*\d{1,2}\s*[点时]\s*(?:半|整|\d{1,2}\s*分?)?/g, ' ')
   result = result.replace(/\d{1,2}[:：]\d{1,2}/g, ' ')
+  result = result.replace(/\d{4}\s*年/g, ' ')
+  result = result.replace(/\d{1,2}\s*[日号]/g, ' ')
+  result = result.replace(/\d{1,2}\s*分/g, ' ')
   const words: string[] = [
-    '新增', '添加', '创建', '发布', '课程', '一个', '请', '帮我',
+    '课程名称', '课程名', '新增', '添加', '创建', '发布', '课程', '一个', '请', '帮我',
     '名为', '叫', '删除', '修改', '更新', '把', '将', '的'
   ]
   for (let i = 0; i < words.length; i++) {
@@ -1044,8 +1354,9 @@ function findCourseByNamePart(name: string): Course | null {
 }
 
 function detectUserField(text: string): string {
-  if (text.includes('学号') || text.includes('编号') || text.includes('studentno')) return 'studentNo'
+  if (text.includes('学号') || text.includes('工号') || text.includes('编号') || text.includes('studentno')) return 'studentNo'
   if (text.includes('角色') || text.includes('身份') || text.includes('role')) return 'role'
+  if (text.includes('姓名') || text.includes('名字')) return 'name'
   return ''
 }
 
@@ -1057,8 +1368,9 @@ function detectCourseField(text: string): string {
 }
 
 function fieldLabel(fieldName: string): string {
-  if (fieldName == 'studentNo') return '学号'
+  if (fieldName == 'studentNo') return '学号/工号'
   if (fieldName == 'role') return '角色'
+  if (fieldName == 'name') return '姓名'
   if (fieldName == 'time') return '上课时间'
   if (fieldName == 'teacher') return '授课老师'
   return fieldName
@@ -1114,30 +1426,492 @@ function buildCourseTargetItems(course: Course): AgentCardItem[] {
   return items
 }
 
+// ------------------------------ 动态回显 / 槽位覆写 ------------------------------
+
+function roleDisplay(role: string): string {
+  if (role == 'student') return '学生'
+  if (role == 'teacher') return '老师'
+  if (role == 'admin') return '管理员'
+  return role
+}
+
+function accountLabel(role: string): string {
+  if (role == 'student') return '学号'
+  if (role == 'teacher' || role == 'admin') return '工号'
+  return '账号'
+}
+
+function joinWithDelimiter(parts: string[], delimiter: string): string {
+  let result = ''
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) result += delimiter
+    result += parts[i]
+  }
+  return result
+}
+
+function hasCompleteTimeSlots(slots: TimeSlots): boolean {
+  return slots.year.length > 0 && slots.month.length > 0 && slots.day.length > 0
+    && slots.hour.length > 0 && slots.minute.length > 0
+}
+
+function describeSlotsText(slots: TimeSlots): string {
+  if (hasCompleteTimeSlots(slots)) return formatTimeSlots(slots)
+  let result = ''
+  if (slots.year.length > 0) result += slots.year + '年'
+  if (slots.month.length > 0) result += toInt(slots.month).toString() + '月'
+  if (slots.day.length > 0) result += toInt(slots.day).toString() + '日'
+  if (slots.hour.length > 0) result += ' ' + describeHour(slots.hour)
+  if (slots.minute.length > 0) result += ' ' + pad2(toInt(slots.minute)) + '分'
+  return result.trim()
+}
+
+function operationTitle(intent: string): string {
+  if (intent == 'add_user') return '新增用户'
+  if (intent == 'add_course') return '新增课程'
+  if (intent == 'update_user') return '修改用户'
+  if (intent == 'update_course') return '修改课程'
+  if (intent == 'delete_user') return '删除用户'
+  if (intent == 'delete_course') return '删除课程'
+  if (intent == 'delete_checkin') return '删除签到'
+  return '业务操作'
+}
+
+function fillDefaultTimeYear(op: PendingOperation): void {
+  if (op.timeSlots.year.length == 0
+    && (op.timeSlots.month.length > 0 || op.timeSlots.day.length > 0)) {
+    op.timeSlots.year = new Date().getFullYear().toString()
+  }
+}
+
+function buildSlotEcho(op: PendingOperation): string {
+  let echo = ''
+  if (op.intent == 'add_user') {
+    if (op.userName.length > 0) echo += '姓名【' + op.userName + '】，'
+    if (op.userRole.length > 0) echo += '角色【' + roleDisplay(op.userRole) + '】，'
+    if (op.studentNo.length > 0) echo += accountLabel(op.userRole) + '【' + op.studentNo + '】，'
+  } else if (op.intent == 'add_course') {
+    if (op.courseName.length > 0) echo += '课程【' + op.courseName + '】，'
+    if (op.teacherName.length > 0) echo += '老师【' + op.teacherName + '】，'
+    if (hasAnyTimeSlot(op.timeSlots)) echo += '时间【' + describeSlotsText(op.timeSlots) + '】，'
+  } else if (op.intent == 'update_user') {
+    const target = findUserById(op.targetUserId)
+    if (target != null) echo += '用户【' + target.name + '】，'
+    if (op.fieldName.length > 0) {
+      const label = op.fieldName == 'studentNo' && target != null
+        ? accountLabel(target.role) : fieldLabel(op.fieldName)
+      echo += '修改项【' + label + '】，'
+    }
+    if (op.newValue.length > 0) {
+      const value = op.fieldName == 'role' ? roleDisplay(op.newValue) : op.newValue
+      echo += '新值【' + value + '】，'
+    }
+  } else if (op.intent == 'update_course') {
+    const course = findCourseById(op.targetCourseId)
+    if (course != null) echo += '课程【' + course.name + '】，'
+    if (op.fieldName == 'time' && hasAnyTimeSlot(op.timeSlots)) {
+      echo += '时间【' + describeSlotsText(op.timeSlots) + '】，'
+    }
+    if (op.fieldName == 'teacher' && op.newValue.length > 0) {
+      echo += '老师【' + op.newValue + '】，'
+    }
+  } else if (op.intent == 'delete_user') {
+    const target = findUserById(op.targetUserId)
+    if (target != null) echo += '用户【' + target.name + '】，'
+  } else if (op.intent == 'delete_course') {
+    const target = findCourseById(op.targetCourseId)
+    if (target != null) echo += '课程【' + target.name + '】，'
+  } else if (op.intent == 'delete_checkin') {
+    if (op.ids.length > 0) echo += '签到记录【' + op.ids.length.toString() + ' 条】，'
+  }
+
+  if (echo.length == 0) return ''
+  if (echo.substring(echo.length - 1) == '，') echo = echo.substring(0, echo.length - 1)
+  return '当前已记录：' + echo + '。'
+}
+
+function buildSlotMissing(op: PendingOperation): string[] {
+  const missing: string[] = []
+  if (op.intent == 'add_user') {
+    if (op.userName.length == 0) missing.push('姓名')
+    if (op.userRole.length == 0) missing.push('角色（学生/老师）')
+    if (op.studentNo.length == 0) missing.push(accountLabel(op.userRole))
+  } else if (op.intent == 'add_course') {
+    if (op.courseName.length == 0) missing.push('课程名称')
+    if (op.teacherName.length == 0) missing.push('授课老师')
+    if (op.timeValue.length == 0) {
+      if (hasAnyTimeSlot(op.timeSlots)) {
+        const timeMissing = missingTimeSlots(op.timeSlots)
+        for (let i = 0; i < timeMissing.length; i++) missing.push(timeMissing[i])
+      } else {
+        missing.push('开课时间')
+      }
+    }
+  } else if (op.intent == 'update_user') {
+    if (op.targetUserId == 0) missing.push('目标用户')
+    if (op.fieldName.length == 0) missing.push('修改字段（学号/角色/姓名）')
+    if (op.newValue.length == 0) missing.push('新值')
+  } else if (op.intent == 'update_course') {
+    if (op.targetCourseId < 0) missing.push('课程名称')
+    if (op.fieldName.length == 0) missing.push('修改内容（时间/老师）')
+    if (op.fieldName == 'time') {
+      if (hasAnyTimeSlot(op.timeSlots)) {
+        const timeMissing = missingTimeSlots(op.timeSlots)
+        for (let i = 0; i < timeMissing.length; i++) missing.push(timeMissing[i])
+      } else {
+        missing.push('上课时间')
+      }
+    }
+    if (op.fieldName == 'teacher' && op.newValue.length == 0) missing.push('授课老师')
+  } else if (op.intent == 'delete_user') {
+    if (op.targetUserId == 0) missing.push('目标用户')
+  } else if (op.intent == 'delete_course') {
+    if (op.targetCourseId < 0) missing.push('目标课程')
+  } else if (op.intent == 'delete_checkin') {
+    if (op.ids.length == 0) missing.push('签到记录')
+  }
+  return missing
+}
+
+function buildSlotPrompt(op: PendingOperation): AgentReply {
+  return buildSlotPromptWithPrefix(op, '')
+}
+
+function buildSlotPromptWithPrefix(op: PendingOperation, prefix: string): AgentReply {
+  const echo = buildSlotEcho(op)
+  const missing = buildSlotMissing(op)
+  let content = prefix
+  if (echo.length > 0) content += echo + ' '
+  if (missing.length > 0) {
+    content += '请补充【' + joinWithDelimiter(missing, '、') + '】。'
+  } else {
+    content += '信息已齐全，正在生成确认。'
+  }
+  content += '\n（提示：您可以随时修改已填信息，例如输入“姓名改成王五”）'
+  setWaiting(op)
+  return textReply(content)
+}
+
+function buildInfoLine(op: PendingOperation): string {
+  if (op.intent == 'add_user') {
+    return '姓名【' + op.userName + '】，角色【' + roleDisplay(op.userRole) + '】，'
+      + accountLabel(op.userRole) + '【' + op.studentNo + '】'
+  }
+  if (op.intent == 'add_course') {
+    return '课程【' + op.courseName + '】，时间【' + op.timeValue + '】，老师【' + op.teacherName + '】'
+  }
+  if (op.intent == 'update_user') {
+    const target = findUserById(op.targetUserId)
+    const name = target == null ? op.userName : target.name
+    const value = op.fieldName == 'role' ? roleDisplay(op.newValue) : op.newValue
+    const label = op.fieldName == 'studentNo' && target != null
+      ? accountLabel(target.role) : fieldLabel(op.fieldName)
+    return '用户【' + name + '】，' + label + '【' + value + '】'
+  }
+  if (op.intent == 'update_course') {
+    const course = findCourseById(op.targetCourseId)
+    const name = course == null ? op.courseName : course.name
+    if (op.fieldName == 'time') {
+      return '课程【' + name + '】，上课时间【' + op.timeValue + '】'
+    }
+    return '课程【' + name + '】，授课老师【' + op.newValue + '】'
+  }
+  if (op.intent == 'delete_user') {
+    const target = findUserById(op.targetUserId)
+    return '用户【' + (target == null ? op.userName : target.name) + '】'
+  }
+  if (op.intent == 'delete_course') {
+    const target = findCourseById(op.targetCourseId)
+    return '课程【' + (target == null ? op.courseName : target.name) + '】'
+  }
+  if (op.intent == 'delete_checkin') {
+    return '签到记录【' + op.ids.length.toString() + ' 条】'
+  }
+  return ''
+}
+
+function buildFinalConfirm(op: PendingOperation, items: AgentCardItem[]): AgentReply {
+  const title = operationTitle(op.intent)
+  const content = '即将执行操作：【' + title + '】。\n信息确认：' + buildInfoLine(op) + '。\n请点击下方按钮确认。'
+  return buildConfirmCard(content, title + '确认', items)
+}
+
+// ------------------------------ 槽位覆写 ------------------------------
+
+function isUnknownInput(text: string): boolean {
+  return text.includes('不知道') || text.includes('不清楚') || text.includes('不记得')
+    || text.includes('随便') || text.includes('乱码') || text.includes('没有') || text == '无'
+}
+
+function applyAddUserOverrides(op: PendingOperation, text: string): boolean {
+  let hasNewInfo = false
+  const name = parseNameOverride(text)
+  if (name.length > 0) {
+    op.userName = name
+    hasNewInfo = true
+  }
+  const userRole = parseUserRole(text)
+  if (userRole.length > 0) {
+    op.userRole = userRole
+    hasNewInfo = true
+  }
+  const studentNo = parseStudentNo(text)
+  if (studentNo.length > 0) {
+    op.studentNo = studentNo
+    hasNewInfo = true
+  }
+  if (op.userName.length == 0) {
+    const mentioned = findMentionedUsers(text)
+    if (mentioned.length == 1) {
+      op.userName = mentioned[0].name
+      hasNewInfo = true
+    }
+  }
+  if (op.userName.length == 0 && !isUnknownInput(text)
+    && text.includes('姓名') == false && text.includes('名字') == false) {
+    let nameSource = text
+    if (studentNo.length > 0) nameSource = removeToken(nameSource, studentNo)
+    if (userRole.length > 0) {
+      nameSource = removeToken(nameSource, '学生')
+      nameSource = removeToken(nameSource, '老师')
+      nameSource = removeToken(nameSource, '教师')
+      nameSource = removeToken(nameSource, '管理员')
+    }
+    const simpleName = cleanUserName(nameSource)
+    if (simpleName.length > 0 && simpleName != '学号' && simpleName != '工号'
+      && simpleName != '编号' && simpleName != '角色' && simpleName != '账号') {
+      op.userName = simpleName
+      hasNewInfo = true
+    }
+  }
+  return hasNewInfo
+}
+
+function applyAddCourseOverrides(op: PendingOperation, text: string): boolean {
+  let hasNewInfo = false
+  const time = extractTimeSkill(text)
+  if (hasAnyTimeSlot(time)) {
+    op.timeSlots = mergeTimeSlots(op.timeSlots, time)
+    hasNewInfo = true
+  }
+  const teacher = parseTeacherName(text)
+  const courseName = parseCourseNameOverride(text)
+  if (courseName.length > 0) {
+    op.courseName = courseName
+    hasNewInfo = true
+  } else if (op.courseName.length == 0 && !isUnknownInput(text)) {
+    let nameSource = text
+    if (teacher.length > 0) {
+      nameSource = removeToken(nameSource, teacher)
+      nameSource = removeToken(nameSource, '老师')
+      nameSource = removeToken(nameSource, '教师')
+      nameSource = removeToken(nameSource, '授课')
+    }
+    const simpleName = cleanCourseName(nameSource)
+    if (simpleName.length > 0 && simpleName != '老师' && simpleName != '教师'
+      && simpleName != '授课' && simpleName != '时间' && simpleName != '开课时间'
+      && simpleName != '上课时间' && simpleName != '课程' && simpleName != '课程名') {
+      op.courseName = simpleName
+      hasNewInfo = true
+    }
+  }
+  if (teacher.length > 0) {
+    if (isAdminMode()) {
+      op.teacherName = teacher
+      hasNewInfo = true
+    } else if (op.teacherName.length == 0) {
+      op.teacherName = currentTeacherName
+      hasNewInfo = true
+    }
+  }
+  return hasNewInfo
+}
+
+function applyUpdateUserOverrides(op: PendingOperation, text: string): boolean {
+  let hasNewInfo = false
+  if (op.targetUserId == 0) {
+    const mentioned = findMentionedUsers(text)
+    if (mentioned.length == 1) {
+      op.targetUserId = mentioned[0].id
+      op.userName = mentioned[0].name
+      hasNewInfo = true
+    } else if (!isUnknownInput(text)) {
+      const name = parseNameOverride(text)
+      const targetName = name.length > 0 ? name : cleanUserName(text)
+      const user = findUserByNamePart(targetName)
+      if (user != null) {
+        op.targetUserId = user.id
+        op.userName = user.name
+        hasNewInfo = true
+      }
+    }
+  }
+  const field = detectUserField(text)
+  if (field.length > 0) {
+    op.fieldName = field
+    hasNewInfo = true
+  }
+  if (op.fieldName == 'studentNo') {
+    const no = parseStudentNo(text)
+    if (no.length > 0) {
+      op.newValue = no
+      hasNewInfo = true
+    }
+  } else if (op.fieldName == 'role') {
+    const role = parseUserRole(text)
+    if (role.length > 0) {
+      op.newValue = role
+      hasNewInfo = true
+    }
+  } else if (op.fieldName == 'name') {
+    const name = parseNameOverride(text)
+    if (name.length > 0) {
+      op.newValue = name
+      hasNewInfo = true
+    }
+  }
+  if (op.fieldName.length == 0) {
+    const role = parseUserRole(text)
+    if (role.length > 0) {
+      op.fieldName = 'role'
+      op.newValue = role
+      hasNewInfo = true
+    }
+  }
+  return hasNewInfo
+}
+
+function applyUpdateCourseOverrides(op: PendingOperation, text: string): boolean {
+  let hasNewInfo = false
+  if (op.targetCourseId < 0) {
+    const mentioned = findMentionedCourses(text)
+    if (mentioned.length == 1) {
+      const course = mentioned[0]
+      if (isTeacherMode() && !isMyCourse(course)) return false
+      op.targetCourseId = course.id
+      op.courseName = course.name
+      hasNewInfo = true
+    } else if (!isUnknownInput(text)) {
+      const courseName = parseCourseNameOverride(text)
+      const targetName = courseName.length > 0 ? courseName : cleanCourseName(text)
+      const course = findCourseByNamePart(targetName)
+      if (course != null) {
+        if (isTeacherMode() && !isMyCourse(course)) return false
+        op.targetCourseId = course.id
+        op.courseName = course.name
+        hasNewInfo = true
+      }
+    }
+  }
+  const time = extractTimeSkill(text)
+  if (hasAnyTimeSlot(time)) {
+    op.timeSlots = mergeTimeSlots(op.timeSlots, time)
+    if (op.fieldName != 'teacher') op.fieldName = 'time'
+    hasNewInfo = true
+  }
+  const field = detectCourseField(text)
+  if (field.length > 0) {
+    op.fieldName = field
+    hasNewInfo = true
+  }
+  if (op.fieldName == 'teacher') {
+    const teacher = parseTeacherName(text)
+    if (teacher.length > 0) {
+      op.newValue = teacher
+      hasNewInfo = true
+    }
+  }
+  return hasNewInfo
+}
+
+function applyDeleteUserOverride(op: PendingOperation, text: string): boolean {
+  const mentioned = findMentionedUsers(text)
+  if (mentioned.length == 1) {
+    op.targetUserId = mentioned[0].id
+    op.userName = mentioned[0].name
+    return true
+  }
+  return false
+}
+
+function applyDeleteCourseOverride(op: PendingOperation, text: string): boolean {
+  const mentioned = findMentionedCourses(text)
+  if (mentioned.length == 1) {
+    if (isTeacherMode() && !isMyCourse(mentioned[0])) return false
+    op.targetCourseId = mentioned[0].id
+    op.courseName = mentioned[0].name
+    return true
+  }
+  return false
+}
+
+function collectCheckinTargets(text: string): CheckinRecord[] {
+  const mentionedUsers = findMentionedUsers(text)
+  const mentionedCourses = findMentionedCourses(text)
+  const keyword = extractDeleteKeyword(text)
+  const result = resolveResult(text)
+  const date = resolveDate(text)
+  let allowedCourseIds: number[] = []
+  if (isTeacherMode()) allowedCourseIds = myCourseIds()
+  const targets: CheckinRecord[] = []
+  for (let i = 0; i < checkinTable.length; i++) {
+    const record = checkinTable[i]
+    if (isTeacherMode() && !allowedCourseIds.includes(record.courseId)) continue
+    let keep = true
+    if (mentionedUsers.length > 0) {
+      keep = false
+      for (let j = 0; j < mentionedUsers.length; j++) {
+        if (mentionedUsers[j].id === record.userId) keep = true
+      }
+    }
+    if (keep && mentionedCourses.length > 0) {
+      let courseMatched = false
+      for (let j = 0; j < mentionedCourses.length; j++) {
+        if (mentionedCourses[j].id === record.courseId) courseMatched = true
+      }
+      keep = courseMatched
+    }
+    if (keep && mentionedUsers.length == 0 && mentionedCourses.length == 0 && keyword.length > 0) {
+      keep = record.userName.toLowerCase().includes(keyword)
+        || record.courseName.toLowerCase().includes(keyword)
+    }
+    if (keep && result.length > 0) keep = record.result == result
+    if (keep && date.length > 0) keep = record.checkinTime.startsWith(date)
+    if (keep) targets.push(record)
+  }
+  return targets
+}
+
+function applyDeleteCheckinOverride(op: PendingOperation, text: string): boolean {
+  const targets = collectCheckinTargets(text)
+  if (targets.length == 0) return false
+  const ids: number[] = []
+  for (let i = 0; i < targets.length; i++) ids.push(targets[i].id)
+  op.ids = ids
+  return true
+}
+
+function applySlotOverrides(op: PendingOperation, text: string): boolean {
+  if (op.intent == 'add_user') return applyAddUserOverrides(op, text)
+  if (op.intent == 'add_course') return applyAddCourseOverrides(op, text)
+  if (op.intent == 'update_user') return applyUpdateUserOverrides(op, text)
+  if (op.intent == 'update_course') return applyUpdateCourseOverrides(op, text)
+  if (op.intent == 'delete_user') return applyDeleteUserOverride(op, text)
+  if (op.intent == 'delete_course') return applyDeleteCourseOverride(op, text)
+  if (op.intent == 'delete_checkin') return applyDeleteCheckinOverride(op, text)
+  return false
+}
+
 // ------------------------------ 新增用户 ------------------------------
 
 function advanceAddUser(op: PendingOperation): AgentReply {
-  if (op.userName.length == 0) {
-    setWaiting(op)
-    return textReply('请问要新增的用户姓名是？')
-  }
-  if (op.studentNo.length == 0 && op.userRole.length == 0) {
-    setWaiting(op)
-    return textReply('收到，正在为您新增用户【' + op.userName + '】。请问学号和角色是什么？')
-  }
-  if (op.studentNo.length == 0) {
-    setWaiting(op)
-    return textReply('请问【' + op.userName + '】的学号是多少？')
-  }
-  if (op.userRole.length == 0) {
-    setWaiting(op)
-    return textReply('请问【' + op.userName + '】的角色是什么？（学生 / 教师 / 管理员）')
+  if (op.userName.length == 0 || op.userRole.length == 0 || op.studentNo.length == 0) {
+    return buildSlotPrompt(op)
   }
   if (studentNoExists(op.studentNo, 0)) {
     const existsNo = op.studentNo
     op.studentNo = ''
-    setWaiting(op)
-    return textReply('学号【' + existsNo + '】已存在，请换一个学号。')
+    return buildSlotPromptWithPrefix(op, accountLabel(op.userRole) + '【' + existsNo + '】已存在，请重新提供。\n')
   }
   const items: AgentCardItem[] = []
   const item1: AgentCardItem = {
@@ -1149,7 +1923,7 @@ function advanceAddUser(op: PendingOperation): AgentReply {
   items.push(item1)
   const item2: AgentCardItem = {
     title: op.studentNo,
-    subtitle: '学号',
+    subtitle: accountLabel(op.userRole),
     badge: '待创建',
     badgeType: 'warn'
   }
@@ -1162,11 +1936,7 @@ function advanceAddUser(op: PendingOperation): AgentReply {
   }
   items.push(item3)
   setConfirm(op)
-  return buildConfirmCard(
-    '即将新增用户：' + op.userName + '(' + op.studentNo + ') / ' + roleText(op.userRole) + '，请确认。',
-    '新增用户确认',
-    items
-  )
+  return buildFinalConfirm(op, items)
 }
 
 function startAddUser(text: string): AgentReply {
@@ -1197,26 +1967,21 @@ function continueAddUser(op: PendingOperation, text: string): AgentReply {
 // ------------------------------ 新增课程 ------------------------------
 
 function advanceAddCourse(op: PendingOperation): AgentReply {
-  if (op.courseName.length == 0) {
-    setWaiting(op)
-    return textReply('请问要新增的课程名称是？')
+  fillDefaultTimeYear(op)
+  const base = todayDateParts()
+  const resolved = resolveTimeSlots(op.timeSlots, base)
+  if (resolved != null) {
+    op.timeSlots = resolved
+    op.timeValue = formatTimeSlots(resolved)
+  } else {
+    op.timeValue = ''
   }
-  if (op.timeValue.length == 0) {
-    setWaiting(op)
-    return textReply('请问【' + op.courseName + '】的开课时间是什么时候？请使用完整格式，例如 2026-11-01 15:30。')
-  }
-  if (op.teacherName.length == 0) {
-    if (isAdminMode()) {
-      setWaiting(op)
-      return textReply('请问【' + op.courseName + '】的授课老师是谁？')
-    }
-    setWaiting(op)
-    return textReply('无法识别当前教师身份，请重新登录后再试。')
+  if (op.courseName.length == 0 || op.timeValue.length == 0 || op.teacherName.length == 0) {
+    return buildSlotPrompt(op)
   }
   if (!teacherExists(op.teacherName)) {
     op.teacherName = ''
-    setWaiting(op)
-    return textReply('没有找到该教师，请提供系统中已有的教师姓名。')
+    return buildSlotPromptWithPrefix(op, '没有找到该教师，请提供系统中已有的教师姓名。\n')
   }
   const items: AgentCardItem[] = []
   const item1: AgentCardItem = {
@@ -1241,11 +2006,7 @@ function advanceAddCourse(op: PendingOperation): AgentReply {
   }
   items.push(item3)
   setConfirm(op)
-  return buildConfirmCard(
-    '即将新增课程：' + op.courseName + ' / ' + op.timeValue + ' / ' + op.teacherName + '，请确认。',
-    '新增课程确认',
-    items
-  )
+  return buildFinalConfirm(op, items)
 }
 
 function startAddCourse(text: string): AgentReply {
@@ -1256,10 +2017,9 @@ function startAddCourse(text: string): AgentReply {
   } else {
     op.teacherName = currentTeacherName
   }
-  const time = parseFullDateTime(text)
-  if (time.length > 0) op.timeValue = time
+  const time = extractTimeSkill(text)
+  if (hasAnyTimeSlot(time)) op.timeSlots = mergeTimeSlots(op.timeSlots, time)
   let nameSource = text
-  if (time.length > 0) nameSource = removeToken(nameSource, time)
   const mentionedUsers = findMentionedUsers(text)
   for (let i = 0; i < mentionedUsers.length; i++) {
     nameSource = removeToken(nameSource, mentionedUsers[i].name)
@@ -1288,48 +2048,40 @@ function continueAddCourse(op: PendingOperation, text: string): AgentReply {
 // ------------------------------ 修改用户 ------------------------------
 
 function advanceUpdateUser(op: PendingOperation): AgentReply {
-  if (op.targetUserId == 0) {
-    setWaiting(op)
-    return textReply('要修改哪位用户？请提供姓名或学号。')
+  if (op.targetUserId == 0 || op.fieldName.length == 0 || op.newValue.length == 0) {
+    return buildSlotPrompt(op)
   }
   const target = findUserById(op.targetUserId)
   if (target == null) {
     op.targetUserId = 0
-    setWaiting(op)
-    return textReply('没有找到该用户，请提供准确的姓名或学号。')
-  }
-  if (op.fieldName.length == 0) {
-    setWaiting(op)
-    return textReply('要修改【' + target.name + '】的学号还是角色？')
-  }
-  if (op.newValue.length == 0) {
-    setWaiting(op)
-    return textReply('请问要改成什么？')
+    return buildSlotPromptWithPrefix(op, '没有找到该用户，请提供准确的姓名或学号。\n')
   }
   if (op.fieldName == 'studentNo') {
     if (op.newValue == target.studentNo) {
       op.newValue = ''
-      setWaiting(op)
-      return textReply('新学号与当前学号相同，请输入新的学号。')
+      return buildSlotPromptWithPrefix(op, '新' + accountLabel(target.role) + '与当前相同，请输入新的值。\n')
     }
     if (studentNoExists(op.newValue, target.id)) {
       const existsNo = op.newValue
       op.newValue = ''
-      setWaiting(op)
-      return textReply('学号【' + existsNo + '】已存在，请换一个学号。')
+      return buildSlotPromptWithPrefix(op, accountLabel(target.role) + '【' + existsNo + '】已存在，请换一个。\n')
     }
   }
-  const displayValue = op.fieldName == 'role' ? roleText(op.newValue) : op.newValue
+  if (op.fieldName == 'role' && parseUserRole(op.newValue).length == 0) {
+    op.newValue = ''
+    return buildSlotPromptWithPrefix(op, '角色只能是学生 / 老师 / 管理员。\n')
+  }
+  const displayValue = op.fieldName == 'role' ? roleDisplay(op.newValue) : op.newValue
   const items: AgentCardItem[] = []
   const item1: AgentCardItem = {
     title: target.name,
-    subtitle: '学号 ' + target.studentNo,
+    subtitle: accountLabel(target.role) + ' ' + target.studentNo,
     badge: roleText(target.role),
     badgeType: roleBadgeType(target.role)
   }
   items.push(item1)
   const item2: AgentCardItem = {
-    title: fieldLabel(op.fieldName),
+    title: op.fieldName == 'studentNo' ? accountLabel(target.role) : fieldLabel(op.fieldName),
     subtitle: '修改字段',
     badge: '待修改',
     badgeType: 'warn'
@@ -1343,11 +2095,7 @@ function advanceUpdateUser(op: PendingOperation): AgentReply {
   }
   items.push(item3)
   setConfirm(op)
-  return buildConfirmCard(
-    '即将修改用户：' + target.name + ' 的 ' + fieldLabel(op.fieldName) + ' 为 ' + displayValue + '，请确认。',
-    '修改用户确认',
-    items
-  )
+  return buildFinalConfirm(op, items)
 }
 
 function startUpdateUser(text: string): AgentReply {
@@ -1375,6 +2123,8 @@ function startUpdateUser(text: string): AgentReply {
     op.newValue = parseStudentNo(text)
   } else if (op.fieldName == 'role') {
     op.newValue = parseUserRole(text)
+  } else if (op.fieldName == 'name') {
+    op.newValue = parseNameOverride(text)
   }
   if (op.fieldName.length == 0) {
     const roleValue = parseUserRole(text)
@@ -1415,6 +2165,7 @@ function continueUpdateUser(op: PendingOperation, text: string): AgentReply {
 // ------------------------------ 修改课程 ------------------------------
 
 function advanceUpdateCourse(op: PendingOperation): AgentReply {
+  fillDefaultTimeYear(op)
   if (op.targetCourseId < 0) {
     if (op.courseName.length > 0) {
       const byName = findCourseByNamePart(op.courseName)
@@ -1428,41 +2179,39 @@ function advanceUpdateCourse(op: PendingOperation): AgentReply {
     }
   }
   if (op.targetCourseId < 0) {
-    setWaiting(op)
-    return textReply('要修改哪门课程？请提供课程名称。')
+    return buildSlotPrompt(op)
   }
   const course = findCourseById(op.targetCourseId)
   if (course == null) {
     op.targetCourseId = -1
-    setWaiting(op)
-    return textReply('没有找到该课程，请提供准确的课程名称。')
+    return buildSlotPromptWithPrefix(op, '没有找到该课程，请提供准确的课程名称。\n')
   }
   if (isTeacherMode() && !isMyCourse(course)) {
     return textReply('权限不足，教师只能修改自己的课程。')
   }
   if (op.fieldName.length == 0) {
-    setWaiting(op)
-    return textReply('要修改【' + course.name + '】的上课时间还是授课老师？')
+    return buildSlotPrompt(op)
   }
   if (op.fieldName == 'time') {
-    if (op.minutePending) {
-      setWaiting(op)
-      return textReply('请问【' + course.name + '】的分钟数设置为多少？')
+    const base = courseDateParts(course)
+    const resolved = resolveTimeSlots(op.timeSlots, base)
+    if (resolved == null) {
+      if (isDateInputInvalid(op.timeSlots)) {
+        op.timeSlots.day = ''
+        return buildSlotPromptWithPrefix(op, '日期无效，请重新告诉我月份和日期。\n')
+      }
+      return buildSlotPrompt(op)
     }
-    if (op.timeValue.length == 0) {
-      setWaiting(op)
-      return textReply('请提供【' + course.name + '】新的上课时间，例如 15:30。')
-    }
+    op.timeSlots = resolved
+    op.timeValue = formatTimeSlots(resolved)
   }
   if (op.fieldName == 'teacher') {
     if (op.newValue.length == 0) {
-      setWaiting(op)
-      return textReply('要改成哪位老师？请提供系统中已有的教师姓名。')
+      return buildSlotPrompt(op)
     }
     if (!teacherExists(op.newValue)) {
       op.newValue = ''
-      setWaiting(op)
-      return textReply('没有找到该教师，请提供系统中已有的教师姓名。')
+      return buildSlotPromptWithPrefix(op, '没有找到该教师，请提供系统中已有的教师姓名。\n')
     }
   }
   const items: AgentCardItem[] = []
@@ -1474,13 +2223,10 @@ function advanceUpdateCourse(op: PendingOperation): AgentReply {
   }
   items.push(item1)
   let displayValue = ''
-  let content = ''
   if (op.fieldName == 'time') {
-    displayValue = op.timeValue.substring(op.timeValue.length - 5)
-    content = '即将把【' + course.name + '】的上课时间修改为【' + displayValue + '】，请确认。'
+    displayValue = op.timeValue
   } else {
     displayValue = op.newValue
-    content = '即将把【' + course.name + '】的授课老师修改为【' + displayValue + '】，请确认。'
   }
   const item2: AgentCardItem = {
     title: fieldLabel(op.fieldName),
@@ -1497,64 +2243,24 @@ function advanceUpdateCourse(op: PendingOperation): AgentReply {
   }
   items.push(item3)
   setConfirm(op)
-  return buildConfirmCard(content, '修改课程确认', items)
+  return buildFinalConfirm(op, items)
 }
 
 function startUpdateCourse(text: string): AgentReply {
-  const op = createOperation('update_course')
   const mentioned = findMentionedCourses(text)
-  if (mentioned.length == 1) {
-    const course = mentioned[0]
-    if (isTeacherMode() && !isMyCourse(course)) {
+  for (let i = 0; i < mentioned.length; i++) {
+    if (isTeacherMode() && !isMyCourse(mentioned[i])) {
       return textReply('权限不足，教师只能修改自己的课程。')
     }
-    op.targetCourseId = course.id
-    op.courseName = course.name
-  } else if (mentioned.length > 1) {
-    return textReply('找到多门匹配课程：' + courseLabel(mentioned) + '。请使用完整课程名。')
   }
-
-  if (op.targetCourseId < 0) {
-    const parts = splitTimeChange(text)
-    let namePart = ''
-    if (parts != null) namePart = cleanCoursePart(parts.coursePart)
-    else namePart = cleanCourseName(text)
-    const course = findCourseByNamePart(namePart)
-    if (course != null) {
-      if (isTeacherMode() && !isMyCourse(course)) {
-        return textReply('权限不足，教师只能修改自己的课程。')
-      }
-      op.targetCourseId = course.id
-      op.courseName = course.name
-    }
-  }
-
-  op.fieldName = detectCourseField(text)
-  if (op.targetCourseId >= 0 && op.fieldName == 'time') {
-    const course = findCourseById(op.targetCourseId)
-    if (course != null) {
-      const parts = splitTimeChange(text)
-      const spec = parts != null ? parts.timePart : text
-      const parsed = parseTimeSpec(spec)
-      if (parsed != null) {
-        if (parsed.hasMinute) {
-          op.timeValue = buildCourseFullTime(course, parsed.hour, parsed.minute)
-        } else {
-          let datePart = datePrefix(0)
-          if (course.startTime.length >= 10) datePart = course.startTime.substring(0, 10)
-          op.timeValue = datePart + ' ' + pad2(parsed.hour)
-          op.minutePending = true
-        }
-      }
-    }
-  }
-  if (op.fieldName == 'teacher') {
-    op.newValue = parseTeacherName(text)
-  }
+  const op = createOperation('update_course')
+  applyUpdateCourseOverrides(op, text)
   return advanceUpdateCourse(op)
 }
 
 function continueUpdateCourse(op: PendingOperation, text: string): AgentReply {
+  let targetJustFilled = false
+  let fieldJustFilled = false
   if (op.targetCourseId < 0) {
     const mentioned = findMentionedCourses(text)
     if (mentioned.length == 1) {
@@ -1564,6 +2270,7 @@ function continueUpdateCourse(op: PendingOperation, text: string): AgentReply {
       }
       op.targetCourseId = course.id
       op.courseName = course.name
+      targetJustFilled = true
     } else {
       const name = cleanCourseName(text)
       const course = findCourseByNamePart(name)
@@ -1573,36 +2280,43 @@ function continueUpdateCourse(op: PendingOperation, text: string): AgentReply {
         }
         op.targetCourseId = course.id
         op.courseName = course.name
+        targetJustFilled = true
       }
     }
   }
+
   if (op.fieldName.length == 0) {
-    op.fieldName = detectCourseField(text)
-  }
-  if (op.fieldName == 'time' && op.targetCourseId >= 0) {
-    const course = findCourseById(op.targetCourseId)
-    if (course != null) {
-      if (op.minutePending) {
-        const minute = parseMinute(text)
-        if (minute >= 0) {
-          op.timeValue = op.timeValue + ':' + pad2(minute)
-          op.minutePending = false
-        }
-      } else if (op.timeValue.length == 0) {
-        const parsed = parseTimeSpec(text)
-        if (parsed != null) {
-          if (parsed.hasMinute) {
-            op.timeValue = buildCourseFullTime(course, parsed.hour, parsed.minute)
-          } else {
-            let datePart = datePrefix(0)
-            if (course.startTime.length >= 10) datePart = course.startTime.substring(0, 10)
-            op.timeValue = datePart + ' ' + pad2(parsed.hour)
-            op.minutePending = true
-          }
-        }
-      }
+    const detected = detectCourseField(text)
+    if (detected.length > 0) {
+      op.fieldName = detected
+      fieldJustFilled = true
     }
   }
+
+  const incoming = extractTimeSlots(text)
+  if (op.fieldName.length == 0 && hasAnyTimeSlot(incoming)) {
+    op.fieldName = 'time'
+    fieldJustFilled = true
+  }
+
+  if (op.fieldName == 'time') {
+    let hasNewTimeInfo = hasAnyTimeSlot(incoming)
+    if (hasNewTimeInfo) {
+      op.timeSlots = mergeTimeSlots(op.timeSlots, incoming)
+    } else if (op.timeSlots.hour.length > 0 && op.timeSlots.minute.length == 0) {
+      const minute = parseMinute(text)
+      if (minute >= 0) {
+        op.timeSlots.minute = pad2(minute)
+        hasNewTimeInfo = true
+      }
+    }
+
+    if (!hasNewTimeInfo && !targetJustFilled && !fieldJustFilled && op.targetCourseId >= 0) {
+      setWaiting(op)
+      return textReply('抱歉，我没能提取到有效的时间，请告诉我月份、日期或具体的几时几分。')
+    }
+  }
+
   if (op.fieldName == 'teacher' && op.newValue.length == 0) {
     op.newValue = parseTeacherName(text)
   }
@@ -1620,14 +2334,12 @@ function advanceDeleteUser(op: PendingOperation): AgentReply {
     }
   }
   if (op.targetUserId == 0) {
-    setWaiting(op)
-    return textReply('要删除哪位用户？请提供姓名或学号。')
+    return buildSlotPrompt(op)
   }
   const target = findUserById(op.targetUserId)
   if (target == null) {
     op.targetUserId = 0
-    setWaiting(op)
-    return textReply('没有找到该用户，请提供准确的姓名或学号。')
+    return buildSlotPromptWithPrefix(op, '没有找到该用户，请提供准确的姓名或学号。\n')
   }
   if (target.role == 'admin') {
     resetSessionState()
@@ -1635,7 +2347,7 @@ function advanceDeleteUser(op: PendingOperation): AgentReply {
   }
   const items = buildUserTargetItems(target)
   setConfirm(op)
-  return buildConfirmCard('即将删除【' + target.name + '】用户，请确认。', '删除用户确认', items)
+  return buildFinalConfirm(op, items)
 }
 
 function startDeleteUser(text: string): AgentReply {
@@ -1678,14 +2390,12 @@ function advanceDeleteCourse(op: PendingOperation): AgentReply {
     }
   }
   if (op.targetCourseId < 0) {
-    setWaiting(op)
-    return textReply('要删除哪门课程？请提供课程名称。')
+    return buildSlotPrompt(op)
   }
   const target = findCourseById(op.targetCourseId)
   if (target == null) {
     op.targetCourseId = -1
-    setWaiting(op)
-    return textReply('没有找到该课程，请提供准确的课程名称。')
+    return buildSlotPromptWithPrefix(op, '没有找到该课程，请提供准确的课程名称。\n')
   }
   if (isTeacherMode() && !isMyCourse(target)) {
     return textReply('权限不足，教师只能删除自己的课程。')
@@ -1696,7 +2406,7 @@ function advanceDeleteCourse(op: PendingOperation): AgentReply {
   }
   const items = buildCourseTargetItems(target)
   setConfirm(op)
-  return buildConfirmCard('即将删除【' + target.name + '】课程，请确认。', '删除课程确认', items)
+  return buildFinalConfirm(op, items)
 }
 
 function startDeleteCourse(text: string): AgentReply {
@@ -1737,43 +2447,6 @@ function continueDeleteCourse(op: PendingOperation, text: string): AgentReply {
   return advanceDeleteCourse(op)
 }
 
-function collectCheckinTargets(text: string): CheckinRecord[] {
-  const mentionedUsers = findMentionedUsers(text)
-  const mentionedCourses = findMentionedCourses(text)
-  const keyword = extractDeleteKeyword(text)
-  const result = resolveResult(text)
-  const date = resolveDate(text)
-  let allowedCourseIds: number[] = []
-  if (isTeacherMode()) allowedCourseIds = myCourseIds()
-  const targets: CheckinRecord[] = []
-  for (let i = 0; i < checkinTable.length; i++) {
-    const record = checkinTable[i]
-    if (isTeacherMode() && !allowedCourseIds.includes(record.courseId)) continue
-    let keep = true
-    if (mentionedUsers.length > 0) {
-      keep = false
-      for (let j = 0; j < mentionedUsers.length; j++) {
-        if (mentionedUsers[j].id === record.userId) keep = true
-      }
-    }
-    if (keep && mentionedCourses.length > 0) {
-      let courseMatched = false
-      for (let j = 0; j < mentionedCourses.length; j++) {
-        if (mentionedCourses[j].id === record.courseId) courseMatched = true
-      }
-      keep = courseMatched
-    }
-    if (keep && mentionedUsers.length == 0 && mentionedCourses.length == 0 && keyword.length > 0) {
-      keep = record.userName.toLowerCase().includes(keyword)
-        || record.courseName.toLowerCase().includes(keyword)
-    }
-    if (keep && result.length > 0) keep = record.result == result
-    if (keep && date.length > 0) keep = record.checkinTime.startsWith(date)
-    if (keep) targets.push(record)
-  }
-  return targets
-}
-
 function hasCheckinFilter(text: string): boolean {
   return findMentionedUsers(text).length > 0 || findMentionedCourses(text).length > 0
     || extractDeleteKeyword(text).length > 0 || resolveResult(text).length > 0 || resolveDate(text).length > 0
@@ -1788,15 +2461,12 @@ function findCheckinById(id: number): CheckinRecord | null {
 
 function advanceDeleteCheckin(op: PendingOperation): AgentReply {
   if (op.ids.length == 0) {
-    setWaiting(op)
-    return textReply('请指定要删除的签到记录，例如「删除张三的签到」。')
+    return buildSlotPrompt(op)
   }
   const items: AgentCardItem[] = []
-  let first: CheckinRecord | null = null
   for (let i = 0; i < op.ids.length; i++) {
     const record = findCheckinById(op.ids[i])
     if (record == null) continue
-    if (first == null) first = record
     if (items.length < 10) {
       const item: AgentCardItem = {
         title: record.userName + ' · ' + record.courseName,
@@ -1807,20 +2477,12 @@ function advanceDeleteCheckin(op: PendingOperation): AgentReply {
       items.push(item)
     }
   }
-  if (items.length == 0 || first == null) {
+  if (items.length == 0) {
     op.ids = []
-    setWaiting(op)
-    return textReply('签到记录已不存在，请重新指定。')
+    return buildSlotPromptWithPrefix(op, '签到记录已不存在，请重新指定。\n')
   }
   setConfirm(op)
-  if (op.ids.length == 1) {
-    return buildConfirmCard(
-      '即将删除【' + first.userName + ' · ' + first.courseName + '】的签到记录，请确认。',
-      '删除签到确认',
-      items
-    )
-  }
-  return buildConfirmCard('即将删除【' + op.ids.length.toString() + '】条签到记录，请确认。', '删除签到确认', items)
+  return buildFinalConfirm(op, items)
 }
 
 function fillDeleteCheckin(op: PendingOperation, text: string): AgentReply {
@@ -1914,6 +2576,10 @@ function executePendingOperation(): AgentReply {
     if (op.fieldName == 'role') {
       target.role = toUserRole(op.newValue)
       return textReply('修改成功：用户「' + target.name + '」的角色已更新为 ' + roleText(op.newValue) + '。')
+    }
+    if (op.fieldName == 'name') {
+      target.name = op.newValue
+      return textReply('修改成功：用户姓名已更新为「' + op.newValue + '」。')
     }
     return textReply('未识别的修改字段，操作已取消。')
   }
@@ -2028,6 +2694,18 @@ function continuePending(op: PendingOperation, text: string): AgentReply {
   return textReply('操作状态已重置，请重新发起。')
 }
 
+function advanceOperation(op: PendingOperation): AgentReply {
+  if (op.intent == 'add_user') return advanceAddUser(op)
+  if (op.intent == 'add_course') return advanceAddCourse(op)
+  if (op.intent == 'update_user') return advanceUpdateUser(op)
+  if (op.intent == 'update_course') return advanceUpdateCourse(op)
+  if (op.intent == 'delete_user') return advanceDeleteUser(op)
+  if (op.intent == 'delete_course') return advanceDeleteCourse(op)
+  if (op.intent == 'delete_checkin') return advanceDeleteCheckin(op)
+  resetSessionState()
+  return textReply('操作状态已重置，请重新发起。')
+}
+
 // ------------------------------ 统一入口 ------------------------------
 
 export function processMessage(raw: string, role: string, teacherName: string): AgentReply {
@@ -2059,20 +2737,30 @@ export function processMessage(raw: string, role: string, teacherName: string): 
     return executePendingOperation()
   }
 
-  // 槽位填充：等待用户补充参数。
+  // 槽位填充：全量扫描并覆写，任何碎片都保留 pendingOp。
   if (sessionState == 'awaiting_slots') {
-    if (isCancel(text)) {
+    if (isCancel(text) || text.includes('取消')) {
       resetSessionState()
       return textReply('已取消本次操作。')
     }
     const op = pendingOp
-    if (op != null) return continuePending(op, text)
+    if (op != null) {
+      if (text == '确认' || text == '确认执行' || text == '确定' || text == '执行'
+        || text == '确认修改' || text == '确认删除') {
+        return buildSlotPromptWithPrefix(op, '信息还未填写完整，请先补充。\n')
+      }
+      const hasNewInfo = applySlotOverrides(op, text)
+      if (!hasNewInfo) {
+        return buildSlotPromptWithPrefix(op, '未能识别新增信息，请按提示补充或修改。\n')
+      }
+      return advanceOperation(op)
+    }
     resetSessionState()
   }
 
-  // 二次确认：文本确认也可执行。
+  // 二次确认：允许直接输入修改内容，回退到槽位填充；乱输保留 pendingOp。
   if (sessionState == 'awaiting_confirm') {
-    if (isCancel(text)) {
+    if (isCancel(text) || text.includes('取消')) {
       resetSessionState()
       return textReply('已取消本次操作。')
     }
@@ -2080,8 +2768,20 @@ export function processMessage(raw: string, role: string, teacherName: string): 
       || text == '确认修改' || text == '确认删除') {
       return executePendingOperation()
     }
-    // 新指令：放弃旧的待确认操作，继续走白名单。
-    resetSessionState()
+    const op = pendingOp
+    if (op != null) {
+      const hasNewInfo = applySlotOverrides(op, text)
+      if (hasNewInfo) {
+        sessionState = 'awaiting_slots'
+        return advanceOperation(op)
+      }
+    }
+    return textReply('请点击下方按钮或回复确认/取消；如需修改，请直接输入（例如“姓名改成王五”）。')
+  }
+
+  if (text == '确认' || text == '确认执行' || text == '确定' || text == '执行'
+    || text == '确认修改' || text == '确认删除') {
+    return textReply('当前没有待确认的操作。')
   }
 
   const intent = detectWriteIntent(text)
